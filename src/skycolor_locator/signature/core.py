@@ -1,0 +1,195 @@
+"""Core color-signature kernel for Skycolor Locator."""
+
+from __future__ import annotations
+
+from colorsys import rgb_to_hsv
+from datetime import datetime
+from typing import Any
+
+from skycolor_locator.astro.solar import solar_position
+from skycolor_locator.contracts import AtmosphereState, ColorSignature, SurfaceClass, SurfaceState
+from skycolor_locator.sky.analytic import render_sky_rgb
+
+
+def srgb_to_hsv(rgb: list[float]) -> tuple[float, float, float]:
+    """Convert an sRGB pixel (0..1) to HSV."""
+    if len(rgb) != 3:
+        raise ValueError("rgb must contain 3 channels.")
+
+    r = max(0.0, min(1.0, float(rgb[0])))
+    g = max(0.0, min(1.0, float(rgb[1])))
+    b = max(0.0, min(1.0, float(rgb[2])))
+    return rgb_to_hsv(r, g, b)
+
+
+def _flatten_rgb_grid(rgb: list[list[list[float]]]) -> list[list[float]]:
+    """Flatten (H, W, 3) grid into a list of RGB triplets."""
+    return [pixel for row in rgb for pixel in row]
+
+
+def hue_histogram(rgb: list[list[list[float]]] | list[list[float]], bins: int, weight_mode: str = "sv") -> list[float]:
+    """Compute normalized hue histogram from RGB pixels.
+
+    Args:
+        rgb: Either a `(H, W, 3)` nested list or flat `(N, 3)` list.
+        bins: Number of hue bins.
+        weight_mode: One of `"sv"`, `"s"`, or `"uniform"`.
+    """
+    if bins <= 0:
+        raise ValueError("bins must be positive.")
+
+    pixels: list[list[float]]
+    if rgb and isinstance(rgb[0][0], list):
+        pixels = _flatten_rgb_grid(rgb)  # type: ignore[arg-type]
+    else:
+        pixels = rgb  # type: ignore[assignment]
+
+    hist = [0.0] * bins
+    for pixel in pixels:
+        h, s, v = srgb_to_hsv(pixel)
+        idx = min(int(h * bins), bins - 1)
+        if weight_mode == "sv":
+            w = s * v
+        elif weight_mode == "s":
+            w = s
+        elif weight_mode == "uniform":
+            w = 1.0
+        else:
+            raise ValueError("weight_mode must be one of: sv, s, uniform")
+        hist[idx] += w
+
+    total = sum(hist)
+    if total <= 0:
+        return [1.0 / bins] * bins
+    return [v / total for v in hist]
+
+
+def smooth_circular(values: list[float], window: int = 3) -> list[float]:
+    """Apply circular moving-average smoothing for periodic histograms."""
+    if window <= 1:
+        return values.copy()
+
+    n = len(values)
+    if n == 0:
+        return []
+
+    radius = window // 2
+    out = [0.0] * n
+    denom = float(2 * radius + 1)
+    for i in range(n):
+        acc = 0.0
+        for k in range(-radius, radius + 1):
+            acc += values[(i + k) % n]
+        out[i] = acc / denom
+
+    total = sum(out)
+    if total > 0.0:
+        out = [x / total for x in out]
+    return out
+
+
+def _surface_palette(surface: SurfaceState) -> dict[str, float]:
+    """Build surface-class palette weights with normalized mixing."""
+    mix = dict(surface.landcover_mix)
+    if not mix:
+        mix = {surface.surface_class.value: 1.0}
+
+    total = sum(max(0.0, v) for v in mix.values())
+    if total <= 0.0:
+        return {surface.surface_class.value: 1.0}
+
+    return {k: max(0.0, v) / total for k, v in mix.items()}
+
+
+def _class_to_rgb(name: str) -> tuple[float, float, float]:
+    """Map landcover class to representative sRGB color."""
+    palette = {
+        SurfaceClass.OCEAN.value: (0.14, 0.38, 0.62),
+        SurfaceClass.LAND.value: (0.45, 0.40, 0.26),
+        SurfaceClass.URBAN.value: (0.50, 0.50, 0.52),
+        SurfaceClass.SNOW.value: (0.92, 0.94, 0.98),
+        SurfaceClass.DESERT.value: (0.80, 0.68, 0.42),
+        SurfaceClass.FOREST.value: (0.12, 0.35, 0.16),
+    }
+    return palette.get(name, (0.45, 0.40, 0.26))
+
+
+def compute_color_signature(
+    dt: datetime,
+    lat: float,
+    lon: float,
+    atmos: AtmosphereState,
+    surface: SurfaceState,
+    config: dict[str, Any] | None = None,
+) -> ColorSignature:
+    """Compute sky/ground hue signature from analytic sky and simple ground model."""
+    cfg = config or {}
+    bins = int(cfg.get("bins", 36))
+    n_az = int(cfg.get("n_az", 48))
+    n_el = int(cfg.get("n_el", 24))
+    smooth_window = int(cfg.get("smooth_window", 3))
+
+    sky_rgb, sky_meta = render_sky_rgb(dt=dt, lat=lat, lon=lon, atmos=atmos, n_az=n_az, n_el=n_el)
+    sky_hist = hue_histogram(sky_rgb, bins=bins, weight_mode="sv")
+    sky_hist = smooth_circular(sky_hist, window=smooth_window)
+
+    horizon = sky_rgb[0]
+    horizon_color = [
+        sum(pixel[c] for pixel in horizon) / len(horizon)
+        for c in range(3)
+    ]
+
+    palette = _surface_palette(surface)
+    albedo = max(0.0, min(1.0, surface.dominant_albedo))
+    _, _, sun_elev_deg = solar_position(dt, lat, lon)
+    illum = max(0.15, min(1.0, 0.2 + max(sun_elev_deg, 0.0) / 90.0))
+    haze = max(0.0, min(0.85, 0.15 + 0.55 * atmos.cloud_fraction + 0.2 * atmos.aerosol_optical_depth))
+
+    ground_pixels: list[list[float]] = []
+    for name, weight in palette.items():
+        base = _class_to_rgb(name)
+        lit = [base[i] * (0.35 + 0.65 * illum) * (0.5 + 0.5 * albedo) for i in range(3)]
+        mixed = [lit[i] * (1.0 - haze) + horizon_color[i] * haze for i in range(3)]
+
+        # Deterministic replication proportional to class weight.
+        count = max(1, int(round(weight * bins * 8)))
+        ground_pixels.extend([mixed] * count)
+
+    ground_hist = hue_histogram(ground_pixels, bins=bins, weight_mode="sv")
+    ground_hist = smooth_circular(ground_hist, window=smooth_window)
+
+    signature = sky_hist + ground_hist
+    hue_bins = [i / bins for i in range(bins)]
+
+    cloud = max(0.0, min(1.0, atmos.cloud_fraction))
+    turbidity = sky_meta.get("turbidity", 3.0)
+    uncertainty_score = max(0.0, min(1.0, 0.15 + 0.45 * cloud + 0.05 * float(turbidity) / 10.0))
+
+    quality_flags: list[str] = []
+    if cloud > 0.7:
+        quality_flags.append("high_cloud")
+    if float(turbidity) > 7.0:
+        quality_flags.append("high_turbidity")
+    if sun_elev_deg < 0.0:
+        quality_flags.append("sun_below_horizon")
+    if not quality_flags:
+        quality_flags.append("ok")
+
+    meta: dict[str, Any] = {
+        "sun_elev_deg": sun_elev_deg,
+        "sza_deg": sky_meta.get("sza_deg"),
+        "saz_deg": sky_meta.get("saz_deg"),
+        "turbidity": turbidity,
+        "quality_flags": quality_flags,
+        "uncertainty_score": uncertainty_score,
+    }
+
+    return ColorSignature(
+        hue_bins=hue_bins,
+        sky_hue_hist=sky_hist,
+        ground_hue_hist=ground_hist,
+        signature=signature,
+        meta=meta,
+        uncertainty_score=uncertainty_score,
+        quality_flags=quality_flags,
+    )
