@@ -56,8 +56,10 @@
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,api]"
 ```
+
+> API 테스트(`tests/test_api.py`)까지 기본 실행하려면 `api` extra(예: fastapi, uvicorn, httpx)가 필요합니다.
 
 ### 3.2 품질
 ```bash
