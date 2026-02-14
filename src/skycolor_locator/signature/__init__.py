@@ -1,0 +1,1 @@
+"""Signature computation package."""
