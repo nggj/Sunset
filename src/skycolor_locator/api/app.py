@@ -7,7 +7,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from skycolor_locator.index.bruteforce import BruteforceIndex
@@ -15,6 +15,7 @@ from skycolor_locator.index.store import IndexCacheKey, IndexStore
 from skycolor_locator.ingest.mock_providers import MockEarthStateProvider, MockSurfaceProvider
 from skycolor_locator.orchestrate.batch import GridSpec, generate_lat_lon_grid
 from skycolor_locator.signature.core import compute_color_signature
+from skycolor_locator.signature.perceptual import compute_perceptual_v1
 
 _MODEL_VERSION = "mvp-v1"
 _DEFAULT_GRID_SPEC = GridSpec(
@@ -102,6 +103,7 @@ class SearchRequest(BaseModel):
 
     top_k: int = Field(default=3, ge=1, le=50)
     metric: Literal["cosine", "emd", "circular_emd"] = "cosine"
+    vector_type: Literal["hue_signature", "perceptual_v1"] = "hue_signature"
     filters: SearchFilters | None = None
 
     @model_validator(mode="after")
@@ -123,7 +125,9 @@ class SearchRequest(BaseModel):
             and self.window_start_utc > self.window_end_utc
         ):
             raise ValueError("window_start_utc must be <= window_end_utc")
-        if self.metric in {"emd", "circular_emd"}:
+        if self.vector_type == "perceptual_v1" and self.metric in {"emd", "circular_emd"}:
+            raise ValueError("perceptual_v1 supports only cosine metric")
+        if self.metric in {"emd", "circular_emd"} and self.vector_type == "hue_signature":
             target = self.target_signature
             if target is not None and len(target) % 2 != 0:
                 raise ValueError(
@@ -238,7 +242,7 @@ def create_app() -> FastAPI:
         grid_spec = _normalize_grid_spec(payload.grid_spec)
 
         if payload.target_signature is not None:
-            target_signature = payload.target_signature
+            target_vector = payload.target_signature
         else:
             target_dt = _normalize_time(payload.target_time_utc)
             assert payload.target_lat is not None and payload.target_lon is not None
@@ -248,21 +252,34 @@ def create_app() -> FastAPI:
             target_surface = surface_provider.get_surface_state(
                 payload.target_lat, payload.target_lon
             )
-            target_signature = compute_color_signature(
-                target_dt,
-                payload.target_lat,
-                payload.target_lon,
-                target_atmos,
-                target_surface,
-            ).signature
+            if payload.vector_type == "hue_signature":
+                target_vector = compute_color_signature(
+                    target_dt,
+                    payload.target_lat,
+                    payload.target_lon,
+                    target_atmos,
+                    target_surface,
+                    config={"bins": 36},
+                ).signature
+            else:
+                target_vector, _ = compute_perceptual_v1(
+                    target_dt,
+                    payload.target_lat,
+                    payload.target_lon,
+                    target_atmos,
+                    target_surface,
+                )
 
-        if len(target_signature) % 2 != 0:
-            raise ValueError("target_signature length must be even")
-        bins = len(target_signature) // 2
+        if payload.vector_type == "hue_signature" and len(target_vector) % 2 != 0:
+            raise HTTPException(status_code=422, detail="target_signature length must be even")
+        if not target_vector:
+            raise HTTPException(status_code=422, detail="target_signature must be non-empty")
 
+        vector_dim = len(target_vector)
         cache_key = IndexCacheKey(
             time_bucket=time_bucket,
-            bins=bins,
+            vector_type=payload.vector_type,
+            vector_dim=vector_dim,
             grid_spec_hash=_grid_hash(grid_spec),
             model_version=_MODEL_VERSION,
             metric=payload.metric,
@@ -276,10 +293,31 @@ def create_app() -> FastAPI:
             for lat, lon in generate_lat_lon_grid(grid_spec):
                 atmos = earth_provider.get_atmosphere_state(query_time, lat, lon)
                 surface = surface_provider.get_surface_state(lat, lon)
-                signature = compute_color_signature(query_time, lat, lon, atmos, surface)
+                if payload.vector_type == "hue_signature":
+                    candidate_vector = compute_color_signature(
+                        query_time,
+                        lat,
+                        lon,
+                        atmos,
+                        surface,
+                        config={"bins": vector_dim // 2},
+                    ).signature
+                else:
+                    candidate_vector, _ = compute_perceptual_v1(
+                        query_time, lat, lon, atmos, surface
+                    )
+
+                if len(candidate_vector) != vector_dim:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "target vector dimension does not match candidate vector dimension"
+                        ),
+                    )
+
                 key = f"lat={lat:.3f},lon={lon:.3f},t={query_time.isoformat()}"
                 keys.append(key)
-                vectors.append(signature.signature)
+                vectors.append(candidate_vector)
                 metadata_by_key[key] = {
                     "lat": lat,
                     "lon": lon,
@@ -291,9 +329,7 @@ def create_app() -> FastAPI:
             return index, metadata_by_key
 
         entry, was_built = index_store.get_or_build(cache_key, builder)
-        all_ranked = entry.index.query(
-            target_signature, top_k=max(payload.top_k * 10, payload.top_k)
-        )
+        all_ranked = entry.index.query(target_vector, top_k=max(payload.top_k * 10, payload.top_k))
         filtered = [
             (key, dist)
             for key, dist in all_ranked
