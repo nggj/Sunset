@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypeAlias
 
-from skycolor_locator.index.metrics import cosine_distance
+from skycolor_locator.index.metrics import (
+    circular_emd_signature_halves,
+    cosine_distance,
+    emd_signature_halves,
+)
 
 NDArray: TypeAlias = Any
 
@@ -40,16 +44,20 @@ def _to_query_vector(vector: NDArray) -> list[float]:
 
 
 class BruteforceIndex:
-    """Brute-force vector index supporting cosine or dot-product scoring."""
+    """Brute-force vector index supporting cosine, dot-product, and EMD scoring."""
 
-    def __init__(self, mode: Literal["cosine", "dot"] = "cosine") -> None:
+    def __init__(
+        self, mode: Literal["cosine", "dot", "emd", "circular_emd"] = "cosine"
+    ) -> None:
         """Initialize index.
 
         Args:
-            mode: `"cosine"` for cosine distance, `"dot"` for negative inner-product distance.
+            mode: `"cosine"` for cosine distance, `"dot"` for negative inner-product
+                distance, `"emd"` for linear histogram EMD, and
+                `"circular_emd"` for circular histogram EMD.
         """
-        if mode not in {"cosine", "dot"}:
-            raise ValueError("mode must be 'cosine' or 'dot'")
+        if mode not in {"cosine", "dot", "emd", "circular_emd"}:
+            raise ValueError("mode must be one of: cosine, dot, emd, circular_emd")
         self.mode = mode
         self._keys: list[str] = []
         self._vectors: list[list[float]] = []
@@ -81,8 +89,12 @@ class BruteforceIndex:
         for key, candidate in zip(self._keys, self._vectors, strict=True):
             if self.mode == "cosine":
                 dist = cosine_distance(q, candidate)
-            else:
+            elif self.mode == "dot":
                 dist = -sum(x * y for x, y in zip(q, candidate, strict=True))
+            elif self.mode == "emd":
+                dist = emd_signature_halves(q, candidate)
+            else:
+                dist = circular_emd_signature_halves(q, candidate)
             scored.append((key, dist))
 
         scored.sort(key=lambda item: item[1])

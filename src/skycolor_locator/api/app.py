@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from skycolor_locator.index.bruteforce import BruteforceIndex
@@ -15,6 +16,8 @@ from skycolor_locator.index.store import IndexCacheKey, IndexStore
 from skycolor_locator.ingest.mock_providers import MockEarthStateProvider, MockSurfaceProvider
 from skycolor_locator.orchestrate.batch import GridSpec, generate_lat_lon_grid
 from skycolor_locator.signature.core import compute_color_signature
+from skycolor_locator.ml.residual_model import ResidualHistogramModel
+from skycolor_locator.signature.perceptual import compute_perceptual_v1
 
 _MODEL_VERSION = "mvp-v1"
 _DEFAULT_GRID_SPEC = GridSpec(
@@ -33,6 +36,7 @@ class SignatureRequest(BaseModel):
     time_utc: datetime
     lat: float = Field(ge=-90.0, le=90.0)
     lon: float = Field(ge=-180.0, le=180.0)
+    apply_residual: bool = False
 
 
 class ColorSignatureResponse(BaseModel):
@@ -101,6 +105,9 @@ class SearchRequest(BaseModel):
     bucket_minutes: int = Field(default=60, ge=1, le=24 * 60)
 
     top_k: int = Field(default=3, ge=1, le=50)
+    metric: Literal["cosine", "emd", "circular_emd"] = "cosine"
+    vector_type: Literal["hue_signature", "perceptual_v1"] = "hue_signature"
+    apply_residual: bool = False
     filters: SearchFilters | None = None
 
     @model_validator(mode="after")
@@ -122,6 +129,14 @@ class SearchRequest(BaseModel):
             and self.window_start_utc > self.window_end_utc
         ):
             raise ValueError("window_start_utc must be <= window_end_utc")
+        if self.vector_type == "perceptual_v1" and self.metric in {"emd", "circular_emd"}:
+            raise ValueError("perceptual_v1 supports only cosine metric")
+        if self.metric in {"emd", "circular_emd"} and self.vector_type == "hue_signature":
+            target = self.target_signature
+            if target is not None and len(target) % 2 != 0:
+                raise ValueError(
+                    "target_signature must be an even-length histogram signature for EMD metrics"
+                )
         return self
 
 
@@ -215,13 +230,30 @@ def create_app() -> FastAPI:
     surface_provider = MockSurfaceProvider()
     index_store = IndexStore(ttl_seconds=600, max_entries=16)
 
+    residual_model: ResidualHistogramModel | None = None
+    residual_model_path = os.getenv("SKYCOLOR_RESIDUAL_MODEL_PATH")
+    if residual_model_path:
+        residual_model = ResidualHistogramModel.load_json(residual_model_path)
+
     @app.post("/signature", response_model=ColorSignatureResponse)
     def post_signature(payload: SignatureRequest) -> ColorSignatureResponse:
         """Generate one color signature for input time/location."""
         dt = _normalize_time(payload.time_utc)
         atmos = earth_provider.get_atmosphere_state(dt, payload.lat, payload.lon)
         surface = surface_provider.get_surface_state(payload.lat, payload.lon)
-        signature = compute_color_signature(dt, payload.lat, payload.lon, atmos, surface)
+        if payload.apply_residual and residual_model is None:
+            raise HTTPException(status_code=422, detail="residual model is not loaded")
+        signature = compute_color_signature(
+            dt,
+            payload.lat,
+            payload.lon,
+            atmos,
+            surface,
+            config={
+                "apply_residual": payload.apply_residual,
+                "residual_model": residual_model,
+            },
+        )
         return ColorSignatureResponse(**signature.to_dict())
 
     @app.post("/search", response_model=SearchResponse)
@@ -230,8 +262,11 @@ def create_app() -> FastAPI:
         query_time, time_bucket = _resolve_time_bucket(payload)
         grid_spec = _normalize_grid_spec(payload.grid_spec)
 
+        if payload.apply_residual and residual_model is None:
+            raise HTTPException(status_code=422, detail="residual model is not loaded")
+
         if payload.target_signature is not None:
-            target_signature = payload.target_signature
+            target_vector = payload.target_signature
         else:
             target_dt = _normalize_time(payload.target_time_utc)
             assert payload.target_lat is not None and payload.target_lon is not None
@@ -241,37 +276,81 @@ def create_app() -> FastAPI:
             target_surface = surface_provider.get_surface_state(
                 payload.target_lat, payload.target_lon
             )
-            target_signature = compute_color_signature(
-                target_dt,
-                payload.target_lat,
-                payload.target_lon,
-                target_atmos,
-                target_surface,
-            ).signature
+            if payload.vector_type == "hue_signature":
+                target_vector = compute_color_signature(
+                    target_dt,
+                    payload.target_lat,
+                    payload.target_lon,
+                    target_atmos,
+                    target_surface,
+                    config={
+                        "bins": 36,
+                        "apply_residual": payload.apply_residual,
+                        "residual_model": residual_model,
+                    },
+                ).signature
+            else:
+                target_vector, _ = compute_perceptual_v1(
+                    target_dt,
+                    payload.target_lat,
+                    payload.target_lon,
+                    target_atmos,
+                    target_surface,
+                )
 
-        if len(target_signature) % 2 != 0:
-            raise ValueError("target_signature length must be even")
-        bins = len(target_signature) // 2
+        if payload.vector_type == "hue_signature" and len(target_vector) % 2 != 0:
+            raise HTTPException(status_code=422, detail="target_signature length must be even")
+        if not target_vector:
+            raise HTTPException(status_code=422, detail="target_signature must be non-empty")
 
+        vector_dim = len(target_vector)
         cache_key = IndexCacheKey(
             time_bucket=time_bucket,
-            bins=bins,
+            vector_type=payload.vector_type,
+            vector_dim=vector_dim,
             grid_spec_hash=_grid_hash(grid_spec),
             model_version=_MODEL_VERSION,
+            metric=payload.metric,
+            apply_residual=payload.apply_residual,
         )
 
         def builder() -> tuple[BruteforceIndex, dict[str, dict[str, Any]]]:
-            index = BruteforceIndex(mode="cosine")
+            index = BruteforceIndex(mode=payload.metric)
             metadata_by_key: dict[str, dict[str, Any]] = {}
             keys: list[str] = []
             vectors: list[list[float]] = []
             for lat, lon in generate_lat_lon_grid(grid_spec):
                 atmos = earth_provider.get_atmosphere_state(query_time, lat, lon)
                 surface = surface_provider.get_surface_state(lat, lon)
-                signature = compute_color_signature(query_time, lat, lon, atmos, surface)
+                if payload.vector_type == "hue_signature":
+                    candidate_vector = compute_color_signature(
+                        query_time,
+                        lat,
+                        lon,
+                        atmos,
+                        surface,
+                        config={
+                            "bins": vector_dim // 2,
+                            "apply_residual": payload.apply_residual,
+                            "residual_model": residual_model,
+                        },
+                    ).signature
+                else:
+                    candidate_vector, _ = compute_perceptual_v1(
+                        query_time, lat, lon, atmos, surface
+                    )
+
+                if len(candidate_vector) != vector_dim:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "target vector dimension does not match candidate vector dimension"
+                        ),
+                    )
+
                 key = f"lat={lat:.3f},lon={lon:.3f},t={query_time.isoformat()}"
                 keys.append(key)
-                vectors.append(signature.signature)
+                vectors.append(candidate_vector)
                 metadata_by_key[key] = {
                     "lat": lat,
                     "lon": lon,
@@ -283,9 +362,7 @@ def create_app() -> FastAPI:
             return index, metadata_by_key
 
         entry, was_built = index_store.get_or_build(cache_key, builder)
-        all_ranked = entry.index.query(
-            target_signature, top_k=max(payload.top_k * 10, payload.top_k)
-        )
+        all_ranked = entry.index.query(target_vector, top_k=max(payload.top_k * 10, payload.top_k))
         filtered = [
             (key, dist)
             for key, dist in all_ranked
