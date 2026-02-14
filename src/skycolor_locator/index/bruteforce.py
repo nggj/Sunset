@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal, TypeAlias
 
 from skycolor_locator.index.metrics import cosine_distance
 
-
-class np:
-    """Minimal numpy namespace shim for ndarray type annotations."""
-
-    ndarray = list[float]
+NDArray: TypeAlias = Any
 
 
-def _to_vector_list(vectors: np.ndarray) -> list[list[float]]:
+def _to_vector_list(vectors: NDArray) -> list[list[float]]:
     """Convert numpy-like 2D arrays into Python list vectors."""
     if hasattr(vectors, "tolist"):
         raw = vectors.tolist()
@@ -31,7 +27,7 @@ def _to_vector_list(vectors: np.ndarray) -> list[list[float]]:
     return converted
 
 
-def _to_query_vector(vector: np.ndarray) -> list[float]:
+def _to_query_vector(vector: NDArray) -> list[float]:
     """Convert numpy-like 1D array into a Python list."""
     if hasattr(vector, "tolist"):
         raw = vector.tolist()
@@ -58,7 +54,7 @@ class BruteforceIndex:
         self._keys: list[str] = []
         self._vectors: list[list[float]] = []
 
-    def add(self, keys: list[str], vectors: np.ndarray) -> None:
+    def add(self, keys: list[str], vectors: NDArray) -> None:
         """Add vectors with keys into in-memory storage."""
         vecs = _to_vector_list(vectors)
         if len(keys) != len(vecs):
@@ -70,7 +66,7 @@ class BruteforceIndex:
         self._keys.extend(keys)
         self._vectors.extend(vecs)
 
-    def query(self, vector: np.ndarray, top_k: int) -> list[tuple[str, float]]:
+    def query(self, vector: NDArray, top_k: int) -> list[tuple[str, float]]:
         """Return nearest keys by configured distance metric."""
         if top_k <= 0:
             raise ValueError("top_k must be positive")

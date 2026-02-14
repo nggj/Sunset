@@ -11,6 +11,11 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
+api = [
+  "fastapi>=0.110.0",
+  "uvicorn>=0.30.0",
+]
+
 dev = [
   "mypy>=1.10.0",
   "pytest>=8.0.0",
@@ -35,3 +40,7 @@ mypy_path = "src"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
+
+[[tool.mypy.overrides]]
+module = ["skycolor_locator.api.app"]
+ignore_errors = true
