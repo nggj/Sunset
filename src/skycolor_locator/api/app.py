@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
@@ -15,6 +16,7 @@ from skycolor_locator.index.store import IndexCacheKey, IndexStore
 from skycolor_locator.ingest.mock_providers import MockEarthStateProvider, MockSurfaceProvider
 from skycolor_locator.orchestrate.batch import GridSpec, generate_lat_lon_grid
 from skycolor_locator.signature.core import compute_color_signature
+from skycolor_locator.ml.residual_model import ResidualHistogramModel
 from skycolor_locator.signature.perceptual import compute_perceptual_v1
 
 _MODEL_VERSION = "mvp-v1"
@@ -34,6 +36,7 @@ class SignatureRequest(BaseModel):
     time_utc: datetime
     lat: float = Field(ge=-90.0, le=90.0)
     lon: float = Field(ge=-180.0, le=180.0)
+    apply_residual: bool = False
 
 
 class ColorSignatureResponse(BaseModel):
@@ -104,6 +107,7 @@ class SearchRequest(BaseModel):
     top_k: int = Field(default=3, ge=1, le=50)
     metric: Literal["cosine", "emd", "circular_emd"] = "cosine"
     vector_type: Literal["hue_signature", "perceptual_v1"] = "hue_signature"
+    apply_residual: bool = False
     filters: SearchFilters | None = None
 
     @model_validator(mode="after")
@@ -226,13 +230,30 @@ def create_app() -> FastAPI:
     surface_provider = MockSurfaceProvider()
     index_store = IndexStore(ttl_seconds=600, max_entries=16)
 
+    residual_model: ResidualHistogramModel | None = None
+    residual_model_path = os.getenv("SKYCOLOR_RESIDUAL_MODEL_PATH")
+    if residual_model_path:
+        residual_model = ResidualHistogramModel.load_json(residual_model_path)
+
     @app.post("/signature", response_model=ColorSignatureResponse)
     def post_signature(payload: SignatureRequest) -> ColorSignatureResponse:
         """Generate one color signature for input time/location."""
         dt = _normalize_time(payload.time_utc)
         atmos = earth_provider.get_atmosphere_state(dt, payload.lat, payload.lon)
         surface = surface_provider.get_surface_state(payload.lat, payload.lon)
-        signature = compute_color_signature(dt, payload.lat, payload.lon, atmos, surface)
+        if payload.apply_residual and residual_model is None:
+            raise HTTPException(status_code=422, detail="residual model is not loaded")
+        signature = compute_color_signature(
+            dt,
+            payload.lat,
+            payload.lon,
+            atmos,
+            surface,
+            config={
+                "apply_residual": payload.apply_residual,
+                "residual_model": residual_model,
+            },
+        )
         return ColorSignatureResponse(**signature.to_dict())
 
     @app.post("/search", response_model=SearchResponse)
@@ -240,6 +261,9 @@ def create_app() -> FastAPI:
         """Search candidate locations by target signature similarity."""
         query_time, time_bucket = _resolve_time_bucket(payload)
         grid_spec = _normalize_grid_spec(payload.grid_spec)
+
+        if payload.apply_residual and residual_model is None:
+            raise HTTPException(status_code=422, detail="residual model is not loaded")
 
         if payload.target_signature is not None:
             target_vector = payload.target_signature
@@ -259,7 +283,11 @@ def create_app() -> FastAPI:
                     payload.target_lon,
                     target_atmos,
                     target_surface,
-                    config={"bins": 36},
+                    config={
+                        "bins": 36,
+                        "apply_residual": payload.apply_residual,
+                        "residual_model": residual_model,
+                    },
                 ).signature
             else:
                 target_vector, _ = compute_perceptual_v1(
@@ -283,6 +311,7 @@ def create_app() -> FastAPI:
             grid_spec_hash=_grid_hash(grid_spec),
             model_version=_MODEL_VERSION,
             metric=payload.metric,
+            apply_residual=payload.apply_residual,
         )
 
         def builder() -> tuple[BruteforceIndex, dict[str, dict[str, Any]]]:
@@ -300,7 +329,11 @@ def create_app() -> FastAPI:
                         lon,
                         atmos,
                         surface,
-                        config={"bins": vector_dim // 2},
+                        config={
+                            "bins": vector_dim // 2,
+                            "apply_residual": payload.apply_residual,
+                            "residual_model": residual_model,
+                        },
                     ).signature
                 else:
                     candidate_vector, _ = compute_perceptual_v1(

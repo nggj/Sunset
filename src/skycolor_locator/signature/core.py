@@ -9,6 +9,8 @@ from typing import Any
 
 from skycolor_locator.astro.solar import solar_position
 from skycolor_locator.contracts import AtmosphereState, ColorSignature, SurfaceClass, SurfaceState
+from skycolor_locator.ml.features import featurize
+from skycolor_locator.ml.residual_model import ResidualHistogramModel
 from skycolor_locator.sky.analytic import render_sky_rgb
 
 # Spec-minimum quality-flag thresholds.
@@ -207,6 +209,9 @@ def compute_color_signature(
     n_el = int(cfg.get("n_el", 24))
     smooth_window = int(cfg.get("smooth_window", 3))
     ground_samples = int(cfg.get("ground_samples", 2000))
+    apply_residual = bool(cfg.get("apply_residual", False))
+    residual_model_obj = cfg.get("residual_model")
+    residual_model = residual_model_obj if isinstance(residual_model_obj, ResidualHistogramModel) else None
 
     sky_rgb, sky_meta = render_sky_rgb(dt=dt, lat=lat, lon=lon, atmos=atmos, n_az=n_az, n_el=n_el)
     sky_hist = hue_histogram(sky_rgb, bins=bins, weight_mode="sv")
@@ -255,7 +260,7 @@ def compute_color_signature(
         "ground_sample_count": len(ground_pixels),
     }
 
-    return ColorSignature(
+    baseline = ColorSignature(
         hue_bins=hue_bins,
         sky_hue_hist=sky_hist,
         ground_hue_hist=ground_hist,
@@ -264,3 +269,11 @@ def compute_color_signature(
         uncertainty_score=uncertainty_score,
         quality_flags=quality_flags,
     )
+
+    if apply_residual:
+        if residual_model is None:
+            raise ValueError("apply_residual=True requires residual_model in config")
+        features, _ = featurize(dt=dt, lat=lat, lon=lon, atmos=atmos, surface=surface)
+        return residual_model.apply_to_signature(baseline, features)
+
+    return baseline

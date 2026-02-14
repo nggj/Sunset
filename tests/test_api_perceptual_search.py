@@ -63,3 +63,20 @@ def test_search_endpoint_rejects_emd_with_perceptual_v1() -> None:
     )
 
     assert response.status_code == 422
+
+
+def test_signature_endpoint_rejects_residual_without_loaded_model() -> None:
+    """`POST /signature` should return 422 when residual model is unavailable."""
+    client = _client()
+
+    response = client.post(
+        "/signature",
+        json={
+            "time_utc": datetime(2024, 5, 12, 9, 0, tzinfo=timezone.utc).isoformat(),
+            "lat": 10.0,
+            "lon": 120.0,
+            "apply_residual": True,
+        },
+    )
+
+    assert response.status_code == 422

@@ -21,6 +21,7 @@ class IndexCacheKey:
     grid_spec_hash: str
     model_version: str
     metric: str
+    apply_residual: bool
 
 
 @dataclass
