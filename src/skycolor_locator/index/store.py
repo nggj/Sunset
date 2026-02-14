@@ -19,6 +19,7 @@ class IndexCacheKey:
     bins: int
     grid_spec_hash: str
     model_version: str
+    metric: str
 
 
 @dataclass

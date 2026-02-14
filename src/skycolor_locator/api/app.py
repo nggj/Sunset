@@ -264,7 +264,8 @@ def create_app() -> FastAPI:
             time_bucket=time_bucket,
             bins=bins,
             grid_spec_hash=_grid_hash(grid_spec),
-            model_version=f"{_MODEL_VERSION}:{payload.metric}",
+            model_version=_MODEL_VERSION,
+            metric=payload.metric,
         )
 
         def builder() -> tuple[BruteforceIndex, dict[str, dict[str, Any]]]:
