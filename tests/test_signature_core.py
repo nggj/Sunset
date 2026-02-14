@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from skycolor_locator.contracts import AtmosphereState, SurfaceClass, SurfaceState
-from skycolor_locator.signature.core import compute_color_signature
+from skycolor_locator.signature.core import _allocate_ground_sample_counts, compute_color_signature
 
 
 def _inputs() -> tuple[datetime, AtmosphereState, SurfaceState]:
@@ -107,3 +107,33 @@ def test_quality_flags_preserve_existing_extra_flags() -> None:
     assert "missing_realtime" in sig.quality_flags
     assert "high_cloud" in sig.quality_flags
     assert "sun_below_horizon" in sig.quality_flags
+
+
+def test_ground_sample_allocation_is_bins_independent() -> None:
+    """Ground sampling count should stay fixed across different bin settings."""
+    dt, atmos, surface = _inputs()
+
+    sig_18 = compute_color_signature(
+        dt, 35.0, 129.0, atmos, surface, {"bins": 18, "ground_samples": 2000}
+    )
+    sig_72 = compute_color_signature(
+        dt, 35.0, 129.0, atmos, surface, {"bins": 72, "ground_samples": 2000}
+    )
+
+    assert sig_18.meta["ground_sample_count"] == 2000
+    assert sig_72.meta["ground_sample_count"] == 2000
+    assert len(sig_18.signature) == 36
+    assert len(sig_72.signature) == 144
+    assert abs(sum(sig_18.ground_hue_hist) - 1.0) < 1e-6
+    assert abs(sum(sig_72.ground_hue_hist) - 1.0) < 1e-6
+
+
+def test_allocate_ground_sample_counts_is_deterministic() -> None:
+    """Sample allocation should be deterministic and preserve total sample count."""
+    palette = {"land": 0.7, "forest": 0.3}
+
+    counts_first = _allocate_ground_sample_counts(palette, 2000)
+    counts_second = _allocate_ground_sample_counts(palette, 2000)
+
+    assert counts_first == counts_second
+    assert sum(counts_first.values()) == 2000

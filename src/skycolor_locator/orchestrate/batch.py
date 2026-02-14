@@ -21,6 +21,7 @@ class GridSpec:
     lon_min: float
     lon_max: float
     step_deg: float
+    max_points: int | None = None
 
 
 def _frange_inclusive(start: float, stop: float, step: float) -> list[float]:
@@ -42,6 +43,9 @@ def generate_lat_lon_grid(spec: GridSpec) -> list[tuple[float, float]]:
     """Generate `(lat, lon)` points from the input grid specification."""
     lats = _frange_inclusive(spec.lat_min, spec.lat_max, spec.step_deg)
     lons = _frange_inclusive(spec.lon_min, spec.lon_max, spec.step_deg)
+    point_count = len(lats) * len(lons)
+    if spec.max_points is not None and point_count > spec.max_points:
+        raise ValueError("grid points exceed max_points safety cap")
     return [(lat, lon) for lat in lats for lon in lons]
 
 
