@@ -1,3 +1,9 @@
+"""Deprecated experimental module.
+
+Canonical implementation lives in `src/skycolor_locator/sky/analytic.py`.
+This file is retained only as a research/prototyping reference.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
