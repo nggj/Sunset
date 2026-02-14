@@ -16,9 +16,11 @@ class IndexCacheKey:
     """Stable cache key for one prebuilt candidate index."""
 
     time_bucket: str
-    bins: int
+    vector_type: str
+    vector_dim: int
     grid_spec_hash: str
     model_version: str
+    metric: str
 
 
 @dataclass
