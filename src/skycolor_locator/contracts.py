@@ -43,6 +43,8 @@ class AtmosphereState:
     humidity: float | None = None
     visibility_km: float | None = None
     pressure_hpa: float | None = None
+    cloud_optical_depth: float | None = None
+    missing_realtime: bool = False
 
 
 class SurfaceClass(StrEnum):

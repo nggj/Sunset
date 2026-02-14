@@ -10,6 +10,14 @@ from skycolor_locator.astro.solar import solar_position
 from skycolor_locator.contracts import AtmosphereState, ColorSignature, SurfaceClass, SurfaceState
 from skycolor_locator.sky.analytic import render_sky_rgb
 
+# Spec-minimum quality-flag thresholds.
+# - is_night: sun elevation <= 0° (below or on horizon)
+# - low_sun: 0° < sun elevation < 10°
+# - cloudy: cloud_fraction >= 0.6 or cloud_optical_depth >= 10
+_LOW_SUN_ELEV_DEG = 10.0
+_CLOUDY_FRACTION_THRESHOLD = 0.6
+_CLOUD_OPTICAL_DEPTH_THRESHOLD = 10.0
+
 
 def srgb_to_hsv(rgb: list[float]) -> tuple[float, float, float]:
     """Convert an sRGB pixel (0..1) to HSV."""
@@ -114,6 +122,49 @@ def _class_to_rgb(name: str) -> tuple[float, float, float]:
     return palette.get(name, (0.45, 0.40, 0.26))
 
 
+def _compute_quality_flags(sun_elev_deg: float, atmos: AtmosphereState, turbidity: float) -> list[str]:
+    """Compute required+extra quality flags with deterministic ordering.
+
+    Required flags from spec are emitted when conditions apply:
+    - `is_night`: sun elevation <= 0°
+    - `low_sun`: 0° < sun elevation < 10°
+    - `missing_realtime`: provider reports missing realtime observations
+    - `cloudy`: cloud fraction >= 0.6 OR cloud optical depth >= 10
+
+    Existing extra flags are preserved (`high_cloud`, `high_turbidity`, `sun_below_horizon`, `ok`).
+    """
+    required: list[str] = []
+    extra: list[str] = []
+
+    cloud_fraction = max(0.0, min(1.0, atmos.cloud_fraction))
+    cloud_optical_depth = atmos.cloud_optical_depth
+
+    if sun_elev_deg <= 0.0:
+        required.append("is_night")
+    if 0.0 < sun_elev_deg < _LOW_SUN_ELEV_DEG:
+        required.append("low_sun")
+    if atmos.missing_realtime:
+        required.append("missing_realtime")
+
+    is_cloudy = cloud_fraction >= _CLOUDY_FRACTION_THRESHOLD or (
+        cloud_optical_depth is not None and cloud_optical_depth >= _CLOUD_OPTICAL_DEPTH_THRESHOLD
+    )
+    if is_cloudy:
+        required.append("cloudy")
+
+    if cloud_fraction > 0.7:
+        extra.append("high_cloud")
+    if turbidity > 7.0:
+        extra.append("high_turbidity")
+    if sun_elev_deg < 0.0:
+        extra.append("sun_below_horizon")
+
+    combined = list(dict.fromkeys(required + extra))
+    if not combined:
+        combined.append("ok")
+    return combined
+
+
 def compute_color_signature(
     dt: datetime,
     lat: float,
@@ -134,10 +185,7 @@ def compute_color_signature(
     sky_hist = smooth_circular(sky_hist, window=smooth_window)
 
     horizon = sky_rgb[0]
-    horizon_color = [
-        sum(pixel[c] for pixel in horizon) / len(horizon)
-        for c in range(3)
-    ]
+    horizon_color = [sum(pixel[c] for pixel in horizon) / len(horizon) for c in range(3)]
 
     palette = _surface_palette(surface)
     albedo = max(0.0, min(1.0, surface.dominant_albedo))
@@ -162,18 +210,9 @@ def compute_color_signature(
     hue_bins = [i / bins for i in range(bins)]
 
     cloud = max(0.0, min(1.0, atmos.cloud_fraction))
-    turbidity = sky_meta.get("turbidity", 3.0)
-    uncertainty_score = max(0.0, min(1.0, 0.15 + 0.45 * cloud + 0.05 * float(turbidity) / 10.0))
-
-    quality_flags: list[str] = []
-    if cloud > 0.7:
-        quality_flags.append("high_cloud")
-    if float(turbidity) > 7.0:
-        quality_flags.append("high_turbidity")
-    if sun_elev_deg < 0.0:
-        quality_flags.append("sun_below_horizon")
-    if not quality_flags:
-        quality_flags.append("ok")
+    turbidity = float(sky_meta.get("turbidity", 3.0))
+    uncertainty_score = max(0.0, min(1.0, 0.15 + 0.45 * cloud + 0.05 * turbidity / 10.0))
+    quality_flags = _compute_quality_flags(sun_elev_deg=sun_elev_deg, atmos=atmos, turbidity=turbidity)
 
     meta: dict[str, Any] = {
         "sun_elev_deg": sun_elev_deg,
