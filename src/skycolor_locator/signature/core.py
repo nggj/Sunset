@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from colorsys import rgb_to_hsv
 from datetime import datetime
+from math import floor
 from typing import Any
 
 from skycolor_locator.astro.solar import solar_position
@@ -35,7 +36,9 @@ def _flatten_rgb_grid(rgb: list[list[list[float]]]) -> list[list[float]]:
     return [pixel for row in rgb for pixel in row]
 
 
-def hue_histogram(rgb: list[list[list[float]]] | list[list[float]], bins: int, weight_mode: str = "sv") -> list[float]:
+def hue_histogram(
+    rgb: list[list[list[float]]] | list[list[float]], bins: int, weight_mode: str = "sv"
+) -> list[float]:
     """Compute normalized hue histogram from RGB pixels.
 
     Args:
@@ -122,7 +125,31 @@ def _class_to_rgb(name: str) -> tuple[float, float, float]:
     return palette.get(name, (0.45, 0.40, 0.26))
 
 
-def _compute_quality_flags(sun_elev_deg: float, atmos: AtmosphereState, turbidity: float) -> list[str]:
+def _allocate_ground_sample_counts(palette: dict[str, float], total_samples: int) -> dict[str, int]:
+    """Allocate a fixed number of samples across classes deterministically."""
+    if total_samples <= 0:
+        raise ValueError("ground_samples must be positive")
+
+    items = sorted(palette.items(), key=lambda item: item[0])
+    raw = [(name, weight * total_samples) for name, weight in items]
+
+    counts = {name: int(floor(value)) for name, value in raw}
+    remaining = total_samples - sum(counts.values())
+
+    remainders = sorted(
+        ((name, value - floor(value)) for name, value in raw),
+        key=lambda item: (-item[1], item[0]),
+    )
+    for idx in range(remaining):
+        name = remainders[idx % len(remainders)][0]
+        counts[name] += 1
+
+    return counts
+
+
+def _compute_quality_flags(
+    sun_elev_deg: float, atmos: AtmosphereState, turbidity: float
+) -> list[str]:
     """Compute required+extra quality flags with deterministic ordering.
 
     Required flags from spec are emitted when conditions apply:
@@ -179,6 +206,7 @@ def compute_color_signature(
     n_az = int(cfg.get("n_az", 48))
     n_el = int(cfg.get("n_el", 24))
     smooth_window = int(cfg.get("smooth_window", 3))
+    ground_samples = int(cfg.get("ground_samples", 2000))
 
     sky_rgb, sky_meta = render_sky_rgb(dt=dt, lat=lat, lon=lon, atmos=atmos, n_az=n_az, n_el=n_el)
     sky_hist = hue_histogram(sky_rgb, bins=bins, weight_mode="sv")
@@ -191,17 +219,18 @@ def compute_color_signature(
     albedo = max(0.0, min(1.0, surface.dominant_albedo))
     _, _, sun_elev_deg = solar_position(dt, lat, lon)
     illum = max(0.15, min(1.0, 0.2 + max(sun_elev_deg, 0.0) / 90.0))
-    haze = max(0.0, min(0.85, 0.15 + 0.55 * atmos.cloud_fraction + 0.2 * atmos.aerosol_optical_depth))
+    haze = max(
+        0.0, min(0.85, 0.15 + 0.55 * atmos.cloud_fraction + 0.2 * atmos.aerosol_optical_depth)
+    )
+
+    class_counts = _allocate_ground_sample_counts(palette, ground_samples)
 
     ground_pixels: list[list[float]] = []
-    for name, weight in palette.items():
+    for name in sorted(palette):
         base = _class_to_rgb(name)
         lit = [base[i] * (0.35 + 0.65 * illum) * (0.5 + 0.5 * albedo) for i in range(3)]
         mixed = [lit[i] * (1.0 - haze) + horizon_color[i] * haze for i in range(3)]
-
-        # Deterministic replication proportional to class weight.
-        count = max(1, int(round(weight * bins * 8)))
-        ground_pixels.extend([mixed] * count)
+        ground_pixels.extend([mixed] * class_counts[name])
 
     ground_hist = hue_histogram(ground_pixels, bins=bins, weight_mode="sv")
     ground_hist = smooth_circular(ground_hist, window=smooth_window)
@@ -212,7 +241,9 @@ def compute_color_signature(
     cloud = max(0.0, min(1.0, atmos.cloud_fraction))
     turbidity = float(sky_meta.get("turbidity", 3.0))
     uncertainty_score = max(0.0, min(1.0, 0.15 + 0.45 * cloud + 0.05 * turbidity / 10.0))
-    quality_flags = _compute_quality_flags(sun_elev_deg=sun_elev_deg, atmos=atmos, turbidity=turbidity)
+    quality_flags = _compute_quality_flags(
+        sun_elev_deg=sun_elev_deg, atmos=atmos, turbidity=turbidity
+    )
 
     meta: dict[str, Any] = {
         "sun_elev_deg": sun_elev_deg,
@@ -221,6 +252,7 @@ def compute_color_signature(
         "turbidity": turbidity,
         "quality_flags": quality_flags,
         "uncertainty_score": uncertainty_score,
+        "ground_sample_count": len(ground_pixels),
     }
 
     return ColorSignature(
