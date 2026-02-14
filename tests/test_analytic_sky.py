@@ -18,6 +18,16 @@ def _mean_saturation(rgb_grid: list[list[list[float]]]) -> float:
     return sum(sats) / len(sats)
 
 
+def _mean_hue(rgb_grid: list[list[list[float]]]) -> float:
+    hues: list[float] = []
+    for row in rgb_grid:
+        for pixel in row:
+            h, s, _ = rgb_to_hsv(pixel[0], pixel[1], pixel[2])
+            if s > 1e-6:
+                hues.append(h)
+    return sum(hues) / len(hues)
+
+
 def test_render_sky_rgb_shape_and_meta() -> None:
     """Renderer should produce (n_el, n_az, 3)-shaped nested lists and metadata."""
     atmos = AtmosphereState(
@@ -83,3 +93,32 @@ def test_cloud_increase_desaturates_sky() -> None:
     cloudy_rgb, _ = render_sky_rgb(dt=dt, lat=35.0, lon=129.0, atmos=cloudy_atmos, n_az=24, n_el=12)
 
     assert _mean_saturation(cloudy_rgb) < _mean_saturation(clear_rgb)
+
+
+def test_sky_chromaticity_changes_with_sun_elevation() -> None:
+    """Average sky hue should differ between noon and near-sunset conditions."""
+    atmos = AtmosphereState(
+        cloud_fraction=0.1,
+        aerosol_optical_depth=0.12,
+        total_ozone_du=300.0,
+        visibility_km=25.0,
+    )
+
+    noon_rgb, _ = render_sky_rgb(
+        dt=datetime(2024, 3, 20, 12, 0, tzinfo=timezone.utc),
+        lat=0.0,
+        lon=0.0,
+        atmos=atmos,
+        n_az=24,
+        n_el=12,
+    )
+    sunset_rgb, _ = render_sky_rgb(
+        dt=datetime(2024, 3, 20, 18, 0, tzinfo=timezone.utc),
+        lat=0.0,
+        lon=0.0,
+        atmos=atmos,
+        n_az=24,
+        n_el=12,
+    )
+
+    assert abs(_mean_hue(noon_rgb) - _mean_hue(sunset_rgb)) > 0.005
