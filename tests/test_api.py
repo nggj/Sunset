@@ -11,9 +11,9 @@ def _client() -> object:
     """Create FastAPI TestClient with optional dependency guards."""
     pytest.importorskip("fastapi")
     testclient_module = pytest.importorskip("fastapi.testclient")
-    from skycolor_locator.api.app import app
+    from skycolor_locator.api.app import create_app
 
-    return testclient_module.TestClient(app)
+    return testclient_module.TestClient(create_app())
 
 
 def test_signature_endpoint_returns_contract_payload() -> None:
