@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI
 from pydantic import BaseModel, Field, model_validator
@@ -101,6 +101,7 @@ class SearchRequest(BaseModel):
     bucket_minutes: int = Field(default=60, ge=1, le=24 * 60)
 
     top_k: int = Field(default=3, ge=1, le=50)
+    metric: Literal["cosine", "emd", "circular_emd"] = "cosine"
     filters: SearchFilters | None = None
 
     @model_validator(mode="after")
@@ -122,6 +123,12 @@ class SearchRequest(BaseModel):
             and self.window_start_utc > self.window_end_utc
         ):
             raise ValueError("window_start_utc must be <= window_end_utc")
+        if self.metric in {"emd", "circular_emd"}:
+            target = self.target_signature
+            if target is not None and len(target) % 2 != 0:
+                raise ValueError(
+                    "target_signature must be an even-length histogram signature for EMD metrics"
+                )
         return self
 
 
@@ -257,11 +264,11 @@ def create_app() -> FastAPI:
             time_bucket=time_bucket,
             bins=bins,
             grid_spec_hash=_grid_hash(grid_spec),
-            model_version=_MODEL_VERSION,
+            model_version=f"{_MODEL_VERSION}:{payload.metric}",
         )
 
         def builder() -> tuple[BruteforceIndex, dict[str, dict[str, Any]]]:
-            index = BruteforceIndex(mode="cosine")
+            index = BruteforceIndex(mode=payload.metric)
             metadata_by_key: dict[str, dict[str, Any]] = {}
             keys: list[str] = []
             vectors: list[list[float]] = []

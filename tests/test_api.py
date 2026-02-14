@@ -111,3 +111,39 @@ def test_search_endpoint_returns_ranked_candidates_with_grid_inputs() -> None:
     assert {"key", "distance"}.issubset(body["candidates"][0])
     assert "lat=" in body["candidates"][0]["key"]
     assert "lon=" in body["candidates"][0]["key"]
+
+
+def test_search_endpoint_metric_affects_cache_key() -> None:
+    """Different search metrics should not reuse the same cached index entry."""
+    client = _client()
+
+    base_payload = {
+        "target_time_utc": datetime(2024, 5, 12, 9, 0, tzinfo=timezone.utc).isoformat(),
+        "target_lat": 37.5665,
+        "target_lon": 126.9780,
+        "time_utc": datetime(2024, 5, 12, 9, 0, tzinfo=timezone.utc).isoformat(),
+        "grid_spec": {
+            "lat_min": -20.0,
+            "lat_max": 20.0,
+            "lon_min": 100.0,
+            "lon_max": 140.0,
+            "step_deg": 20.0,
+            "max_points": 20,
+        },
+        "top_k": 2,
+    }
+
+    cosine_response = client.post("/search", json={**base_payload, "metric": "cosine"})
+    circular_response = client.post(
+        "/search", json={**base_payload, "metric": "circular_emd"}
+    )
+
+    assert cosine_response.status_code == 200
+    assert circular_response.status_code == 200
+
+    cosine_body = cosine_response.json()
+    circular_body = circular_response.json()
+
+    assert cosine_body["cache_hit"] is False
+    assert circular_body["cache_hit"] is False
+    assert circular_body["build_count"] == cosine_body["build_count"] + 1
