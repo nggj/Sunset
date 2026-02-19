@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from math import isclose
 from typing import Any
@@ -65,6 +66,20 @@ class SurfaceState:
     surface_class: SurfaceClass
     dominant_albedo: float
     landcover_mix: dict[str, float] = field(default_factory=dict)
+    class_rgb: dict[str, list[float]] = field(default_factory=dict)
+    periodic_meta: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class PeriodicSurfaceConstants:
+    """Time-bounded periodic constants that describe surface appearance priors."""
+
+    tile_id: str
+    period_start_utc: datetime
+    period_end_utc: datetime
+    landcover_mix: dict[str, float]
+    class_rgb: dict[str, list[float]]
+    meta: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
