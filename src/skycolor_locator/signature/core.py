@@ -114,17 +114,14 @@ def _surface_palette(surface: SurfaceState) -> dict[str, float]:
     return {k: max(0.0, v) / total for k, v in mix.items()}
 
 
-def _class_to_rgb(name: str) -> tuple[float, float, float]:
-    """Map landcover class to representative sRGB color."""
-    palette = {
-        SurfaceClass.OCEAN.value: (0.14, 0.38, 0.62),
-        SurfaceClass.LAND.value: (0.45, 0.40, 0.26),
-        SurfaceClass.URBAN.value: (0.50, 0.50, 0.52),
-        SurfaceClass.SNOW.value: (0.92, 0.94, 0.98),
-        SurfaceClass.DESERT.value: (0.80, 0.68, 0.42),
-        SurfaceClass.FOREST.value: (0.12, 0.35, 0.16),
-    }
-    return palette.get(name, (0.45, 0.40, 0.26))
+_DEFAULT_CLASS_RGB_PALETTE: dict[str, tuple[float, float, float]] = {
+    SurfaceClass.OCEAN.value: (0.14, 0.38, 0.62),
+    SurfaceClass.LAND.value: (0.45, 0.40, 0.26),
+    SurfaceClass.URBAN.value: (0.50, 0.50, 0.52),
+    SurfaceClass.SNOW.value: (0.92, 0.94, 0.98),
+    SurfaceClass.DESERT.value: (0.80, 0.68, 0.42),
+    SurfaceClass.FOREST.value: (0.12, 0.35, 0.16),
+}
 
 
 def _allocate_ground_sample_counts(palette: dict[str, float], total_samples: int) -> dict[str, int]:
@@ -231,8 +228,10 @@ def compute_color_signature(
     class_counts = _allocate_ground_sample_counts(palette, ground_samples)
 
     ground_pixels: list[list[float]] = []
+    default_land = _DEFAULT_CLASS_RGB_PALETTE[SurfaceClass.LAND.value]
     for name in sorted(palette):
-        base = _class_to_rgb(name)
+        override = surface.class_rgb.get(name)
+        base = override if override is not None else _DEFAULT_CLASS_RGB_PALETTE.get(name, default_land)
         lit = [base[i] * (0.35 + 0.65 * illum) * (0.5 + 0.5 * albedo) for i in range(3)]
         mixed = [lit[i] * (1.0 - haze) + horizon_color[i] * haze for i in range(3)]
         ground_pixels.extend([mixed] * class_counts[name])
