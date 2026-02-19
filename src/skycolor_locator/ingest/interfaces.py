@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
-from skycolor_locator.contracts import AtmosphereState, SurfaceState
+from skycolor_locator.contracts import AtmosphereState, PeriodicSurfaceConstants, SurfaceState
 
 
 class EarthStateProvider(Protocol):
@@ -20,3 +20,12 @@ class SurfaceProvider(Protocol):
 
     def get_surface_state(self, lat: float, lon: float) -> SurfaceState:
         """Return surface state for WGS84 point."""
+
+
+class PeriodicConstantsProvider(Protocol):
+    """Interface for retrieving time-bounded periodic surface constants."""
+
+    def get_periodic_surface_constants(
+        self, dt: datetime, lat: float, lon: float
+    ) -> PeriodicSurfaceConstants:
+        """Return periodic surface constants for UTC datetime and WGS84 point."""

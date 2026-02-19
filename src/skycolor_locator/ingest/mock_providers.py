@@ -5,9 +5,18 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from math import cos, pi, sin
 
-from skycolor_locator.contracts import AtmosphereState, SurfaceClass, SurfaceState
+from skycolor_locator.contracts import (
+    AtmosphereState,
+    PeriodicSurfaceConstants,
+    SurfaceClass,
+    SurfaceState,
+)
 from skycolor_locator.ingest.cache import LRUCache
-from skycolor_locator.ingest.interfaces import EarthStateProvider, SurfaceProvider
+from skycolor_locator.ingest.interfaces import (
+    EarthStateProvider,
+    PeriodicConstantsProvider,
+    SurfaceProvider,
+)
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:
@@ -101,3 +110,23 @@ class MockSurfaceProvider(SurfaceProvider):
             )
 
         return self._cache.get(key, factory)
+
+
+class MockPeriodicConstantsProvider(PeriodicConstantsProvider):
+    """Deterministic periodic constants provider for offline/testing workflows."""
+
+    def get_periodic_surface_constants(
+        self, dt: datetime, lat: float, lon: float
+    ) -> PeriodicSurfaceConstants:
+        """Return mock periodic constants with empty priors and source metadata."""
+        del lat, lon
+        dt_utc = dt.astimezone(timezone.utc) if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+        return PeriodicSurfaceConstants(
+            tile_id="mock-tile",
+            period_start_utc=dt_utc,
+            period_end_utc=dt_utc,
+            landcover_mix={},
+            class_rgb={},
+            meta={"source": "mock"},
+        )
