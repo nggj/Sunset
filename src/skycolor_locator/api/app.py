@@ -13,8 +13,26 @@ from pydantic import BaseModel, Field, model_validator
 
 from skycolor_locator.index.bruteforce import BruteforceIndex
 from skycolor_locator.index.store import IndexCacheKey, IndexStore
-from skycolor_locator.ingest.mock_providers import MockEarthStateProvider, MockSurfaceProvider
+from skycolor_locator.ingest.interfaces import (
+    EarthStateProvider,
+    PeriodicConstantsProvider,
+    SurfaceProvider,
+)
+from skycolor_locator.ingest.mock_providers import (
+    MockEarthStateProvider,
+    MockPeriodicConstantsProvider,
+    MockSurfaceProvider,
+)
+from skycolor_locator.ingest.periodic_precomputed_provider import (
+    PrecomputedPeriodicConstantsProvider,
+)
+from skycolor_locator.ingest.precomputed_providers import (
+    PrecomputedEarthStateProvider,
+    PrecomputedSurfaceProvider,
+)
+from skycolor_locator.ingest.surface_enrichment import merge_surface_with_periodic
 from skycolor_locator.orchestrate.batch import GridSpec, generate_lat_lon_grid
+from skycolor_locator.contracts import CameraProfile
 from skycolor_locator.signature.core import compute_color_signature
 from skycolor_locator.ml.residual_model import ResidualHistogramModel
 from skycolor_locator.signature.perceptual import compute_perceptual_v1
@@ -30,6 +48,26 @@ _DEFAULT_GRID_SPEC = GridSpec(
 )
 
 
+class CameraProfileRequest(BaseModel):
+    """Camera profile for frustum-aware signature sampling."""
+
+    fov_h_deg: float = Field(default=90.0, gt=0.0, le=179.0)
+    fov_v_deg: float = Field(default=60.0, gt=0.0, le=179.0)
+    yaw_deg: float = 0.0
+    pitch_deg: float = Field(default=0.0, ge=-90.0, le=90.0)
+    roll_deg: float = 0.0
+
+    def to_contract(self) -> CameraProfile:
+        """Convert API model to camera profile contract."""
+        return CameraProfile(
+            fov_h_deg=self.fov_h_deg,
+            fov_v_deg=self.fov_v_deg,
+            yaw_deg=self.yaw_deg,
+            pitch_deg=self.pitch_deg,
+            roll_deg=self.roll_deg,
+        )
+
+
 class SignatureRequest(BaseModel):
     """Request schema for generating one signature."""
 
@@ -37,6 +75,7 @@ class SignatureRequest(BaseModel):
     lat: float = Field(ge=-90.0, le=90.0)
     lon: float = Field(ge=-180.0, le=180.0)
     apply_residual: bool = False
+    camera_profile: CameraProfileRequest | None = None
 
 
 class ColorSignatureResponse(BaseModel):
@@ -108,6 +147,7 @@ class SearchRequest(BaseModel):
     metric: Literal["cosine", "emd", "circular_emd"] = "cosine"
     vector_type: Literal["hue_signature", "perceptual_v1"] = "hue_signature"
     apply_residual: bool = False
+    camera_profile: CameraProfileRequest | None = None
     filters: SearchFilters | None = None
 
     @model_validator(mode="after")
@@ -222,13 +262,66 @@ def _candidate_passes_filters(metadata: dict[str, Any], filters: SearchFilters |
     return True
 
 
-def create_app() -> FastAPI:
+def _resolve_provider_mode(provider_mode: str | None) -> Literal["mock", "gee"]:
+    """Resolve provider mode from argument/environment with validation."""
+    raw = provider_mode or os.getenv("SKYCOLOR_PROVIDER", "mock")
+    mode = raw.strip().lower()
+    if mode == "mock":
+        return "mock"
+    if mode == "gee":
+        return "gee"
+    raise ValueError("SKYCOLOR_PROVIDER must be one of: mock, gee")
+
+
+def _build_providers(
+    provider_mode: Literal["mock", "gee"],
+) -> tuple[EarthStateProvider, SurfaceProvider, PeriodicConstantsProvider]:
+    """Build ingest providers for the configured runtime mode."""
+    if provider_mode == "gee":
+        earth_path = os.getenv("SKYCOLOR_GEE_EARTHSTATE_PATH")
+        surface_path = os.getenv("SKYCOLOR_GEE_SURFACE_PATH")
+        if not earth_path or not surface_path:
+            raise ValueError(
+                "gee mode requires SKYCOLOR_GEE_EARTHSTATE_PATH and SKYCOLOR_GEE_SURFACE_PATH"
+            )
+        bucket_minutes = int(os.getenv("SKYCOLOR_GEE_BUCKET_MINUTES", "60"))
+        periodic_path = os.getenv("SKYCOLOR_GEE_PERIODIC_PATH")
+        periodic_tile_step_deg = float(os.getenv("SKYCOLOR_GEE_PERIODIC_TILE_STEP_DEG", "0.05"))
+        periodic_provider: PeriodicConstantsProvider
+        if periodic_path:
+            periodic_provider = PrecomputedPeriodicConstantsProvider(
+                dataset_path=periodic_path,
+                tile_step_deg=periodic_tile_step_deg,
+            )
+        else:
+            periodic_provider = MockPeriodicConstantsProvider()
+        return (
+            PrecomputedEarthStateProvider(
+                dataset_path=earth_path,
+                bucket_minutes=bucket_minutes,
+            ),
+            PrecomputedSurfaceProvider(dataset_path=surface_path),
+            periodic_provider,
+        )
+    return (
+        MockEarthStateProvider(),
+        MockSurfaceProvider(),
+        MockPeriodicConstantsProvider(),
+    )
+
+
+def create_app(provider_mode: str | None = None) -> FastAPI:
     """Create and configure the FastAPI app."""
     app = FastAPI(title="Skycolor Locator API", version="0.1.0")
 
-    earth_provider = MockEarthStateProvider()
-    surface_provider = MockSurfaceProvider()
+    mode = _resolve_provider_mode(provider_mode)
+    earth_provider, surface_provider, periodic_provider = _build_providers(mode)
     index_store = IndexStore(ttl_seconds=600, max_entries=16)
+
+    app.state.provider_mode = mode
+    app.state.earth_provider = earth_provider
+    app.state.surface_provider = surface_provider
+    app.state.periodic_constants_provider = periodic_provider
 
     residual_model: ResidualHistogramModel | None = None
     residual_model_path = os.getenv("SKYCOLOR_RESIDUAL_MODEL_PATH")
@@ -239,8 +332,11 @@ def create_app() -> FastAPI:
     def post_signature(payload: SignatureRequest) -> ColorSignatureResponse:
         """Generate one color signature for input time/location."""
         dt = _normalize_time(payload.time_utc)
+        camera = payload.camera_profile.to_contract() if payload.camera_profile else CameraProfile()
         atmos = earth_provider.get_atmosphere_state(dt, payload.lat, payload.lon)
         surface = surface_provider.get_surface_state(payload.lat, payload.lon)
+        periodic = periodic_provider.get_periodic_surface_constants(dt, payload.lat, payload.lon)
+        surface = merge_surface_with_periodic(surface, periodic)
         if payload.apply_residual and residual_model is None:
             raise HTTPException(status_code=422, detail="residual model is not loaded")
         signature = compute_color_signature(
@@ -252,6 +348,7 @@ def create_app() -> FastAPI:
             config={
                 "apply_residual": payload.apply_residual,
                 "residual_model": residual_model,
+                "camera_profile": camera,
             },
         )
         return ColorSignatureResponse(**signature.to_dict())
@@ -261,6 +358,7 @@ def create_app() -> FastAPI:
         """Search candidate locations by target signature similarity."""
         query_time, time_bucket = _resolve_time_bucket(payload)
         grid_spec = _normalize_grid_spec(payload.grid_spec)
+        camera = payload.camera_profile.to_contract() if payload.camera_profile else CameraProfile()
 
         if payload.apply_residual and residual_model is None:
             raise HTTPException(status_code=422, detail="residual model is not loaded")
@@ -276,6 +374,10 @@ def create_app() -> FastAPI:
             target_surface = surface_provider.get_surface_state(
                 payload.target_lat, payload.target_lon
             )
+            target_periodic = periodic_provider.get_periodic_surface_constants(
+                target_dt, payload.target_lat, payload.target_lon
+            )
+            target_surface = merge_surface_with_periodic(target_surface, target_periodic)
             if payload.vector_type == "hue_signature":
                 target_vector = compute_color_signature(
                     target_dt,
@@ -287,6 +389,7 @@ def create_app() -> FastAPI:
                         "bins": 36,
                         "apply_residual": payload.apply_residual,
                         "residual_model": residual_model,
+                        "camera_profile": camera,
                     },
                 ).signature
             else:
@@ -322,6 +425,8 @@ def create_app() -> FastAPI:
             for lat, lon in generate_lat_lon_grid(grid_spec):
                 atmos = earth_provider.get_atmosphere_state(query_time, lat, lon)
                 surface = surface_provider.get_surface_state(lat, lon)
+                periodic = periodic_provider.get_periodic_surface_constants(query_time, lat, lon)
+                surface = merge_surface_with_periodic(surface, periodic)
                 if payload.vector_type == "hue_signature":
                     candidate_vector = compute_color_signature(
                         query_time,
@@ -333,6 +438,7 @@ def create_app() -> FastAPI:
                             "bins": vector_dim // 2,
                             "apply_residual": payload.apply_residual,
                             "residual_model": residual_model,
+                            "camera_profile": camera,
                         },
                     ).signature
                 else:

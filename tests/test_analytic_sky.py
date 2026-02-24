@@ -122,3 +122,30 @@ def test_sky_chromaticity_changes_with_sun_elevation() -> None:
     )
 
     assert abs(_mean_hue(noon_rgb) - _mean_hue(sunset_rgb)) > 0.005
+
+
+def test_cloud_ice_fraction_changes_low_sun_chromaticity() -> None:
+    """Cloud phase proxy should alter low-sun sky hue when COD is high."""
+    dt = datetime(2024, 3, 20, 18, 0, tzinfo=timezone.utc)
+
+    warm_cloud = AtmosphereState(
+        cloud_fraction=0.9,
+        aerosol_optical_depth=0.1,
+        total_ozone_du=300.0,
+        cloud_optical_depth=25.0,
+        cloud_ice_fraction=0.0,
+        cloud_effective_radius_um=8.0,
+    )
+    cold_cloud = AtmosphereState(
+        cloud_fraction=0.9,
+        aerosol_optical_depth=0.1,
+        total_ozone_du=300.0,
+        cloud_optical_depth=25.0,
+        cloud_ice_fraction=1.0,
+        cloud_effective_radius_um=25.0,
+    )
+
+    warm_rgb, _ = render_sky_rgb(dt=dt, lat=0.0, lon=0.0, atmos=warm_cloud, n_az=24, n_el=12)
+    cold_rgb, _ = render_sky_rgb(dt=dt, lat=0.0, lon=0.0, atmos=cold_cloud, n_az=24, n_el=12)
+
+    assert abs(_mean_hue(warm_rgb) - _mean_hue(cold_rgb)) > 0.002
