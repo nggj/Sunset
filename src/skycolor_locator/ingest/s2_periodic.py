@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from math import floor
 from typing import Any
 
 from skycolor_locator.contracts import PeriodicSurfaceConstants
+from skycolor_locator.geo.tiling import tile_bounds, tile_id_for
 from skycolor_locator.ingest.gee_client import GeeConfig, config_from_env, init_ee
 
 _S2_SR = "COPERNICUS/S2_SR_HARMONIZED"
@@ -45,23 +45,6 @@ def _to_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC)
-
-
-def _tile_origin(coord: float, step: float) -> float:
-    return floor(coord / step) * step
-
-
-def tile_bounds(lat: float, lon: float, tile_step_deg: float) -> tuple[float, float, float, float]:
-    """Return tile bounds as (lon_min, lat_min, lon_max, lat_max)."""
-    lat_min = _tile_origin(lat, tile_step_deg)
-    lon_min = _tile_origin(lon, tile_step_deg)
-    return (lon_min, lat_min, lon_min + tile_step_deg, lat_min + tile_step_deg)
-
-
-def tile_id_for(lat: float, lon: float, tile_step_deg: float = 0.05) -> str:
-    """Deterministically encode tile id from lat/lon and angular tile step."""
-    lon_min, lat_min, _, _ = tile_bounds(lat, lon, tile_step_deg)
-    return f"step{tile_step_deg:.4f}:lat{lat_min:.4f}:lon{lon_min:.4f}"
 
 
 def _lin_reflectance_to_srgb(reflectance_rgb: list[float], white: float) -> list[float]:
