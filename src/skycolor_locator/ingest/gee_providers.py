@@ -165,6 +165,7 @@ class GeeEarthStateProvider(EarthStateProvider):
             pressure_hpa = None
             humidity = None
             cloud_optical_depth = None
+            cloud_ice_fraction = None
 
             if era5_img is not None:
                 era5_bands = [
@@ -201,6 +202,9 @@ class GeeEarthStateProvider(EarthStateProvider):
                 if lwp is not None or iwp is not None:
                     lwp_v = 0.0 if lwp is None else max(0.0, float(lwp))
                     iwp_v = 0.0 if iwp is None else max(0.0, float(iwp))
+                    total_wp = lwp_v + iwp_v
+                    if total_wp > 0.0:
+                        cloud_ice_fraction = _clamp(iwp_v / total_wp, 0.0, 1.0)
                     cod = self._atmos_cfg.cod_liquid_factor * lwp_v + self._atmos_cfg.cod_ice_factor * iwp_v
                     cloud_optical_depth = _clamp(cod, 0.0, self._atmos_cfg.cod_max)
 

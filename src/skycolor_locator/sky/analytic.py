@@ -131,12 +131,32 @@ def _ozone_rgb_correction(rgb: tuple[float, float, float], atmos: AtmosphereStat
     )
 
 
-def _apply_cloud_blend(rgb: tuple[float, float, float], atmos: AtmosphereState) -> tuple[float, float, float]:
-    """Blend clear-sky RGB toward overcast colors."""
+def _apply_cloud_blend(
+    rgb: tuple[float, float, float], atmos: AtmosphereState, sun_elev_deg: float
+) -> tuple[float, float, float]:
+    """Blend clear-sky RGB toward cloud optics-aware overcast colors.
+
+    Uses cloud fraction + optical depth as base attenuation, then applies a lightweight
+    phase proxy with optional ice fraction/effective radius terms.
+    """
     cloud_fraction = _clamp(atmos.cloud_fraction, 0.0, 1.0)
-    cod = 0.0 if atmos.cloud_optical_depth is None else max(atmos.cloud_optical_depth, 0.0)
-    blend = _clamp(cloud_fraction * (1.0 - exp(-0.3 * cod if cod > 0.0 else -0.3 * 3.0)), 0.0, 1.0)
-    overcast = (0.75, 0.75, 0.78)
+    cod = 3.0 if atmos.cloud_optical_depth is None else max(atmos.cloud_optical_depth, 0.0)
+    ice_frac = 0.5 if atmos.cloud_ice_fraction is None else _clamp(atmos.cloud_ice_fraction, 0.0, 1.0)
+    eff_r_um = 12.0 if atmos.cloud_effective_radius_um is None else max(atmos.cloud_effective_radius_um, 2.0)
+
+    tau_term = 1.0 - exp(-0.18 * cod)
+    phase_term = 0.75 + 0.25 * ice_frac + 0.12 * _clamp((eff_r_um - 10.0) / 25.0, 0.0, 1.0)
+    blend = _clamp(cloud_fraction * tau_term * phase_term, 0.0, 1.0)
+
+    low_sun = _clamp((15.0 - sun_elev_deg) / 20.0, 0.0, 1.0)
+    warm = (0.86, 0.80, 0.76)
+    cool = (0.74, 0.76, 0.80)
+    overcast = (
+        (1.0 - low_sun) * cool[0] + low_sun * warm[0],
+        (1.0 - low_sun) * cool[1] + low_sun * warm[1],
+        (1.0 - low_sun) * cool[2] + low_sun * warm[2],
+    )
+
     return (
         _clamp((1.0 - blend) * rgb[0] + blend * overcast[0], 0.0, 1.0),
         _clamp((1.0 - blend) * rgb[1] + blend * overcast[1], 0.0, 1.0),
@@ -262,7 +282,7 @@ def render_sky_rgb(
             x_val, y_val, z_val = _xyy_to_xyz(x_chroma, y_chroma, y_norm)
             rgb = _xyz_to_srgb(x_val, y_val, z_val)
             rgb = _ozone_rgb_correction(rgb, atmos, sza_deg)
-            rgb = _apply_cloud_blend(rgb, atmos)
+            rgb = _apply_cloud_blend(rgb, atmos, sun_elev_deg=sun_elev_deg)
 
             row.append([rgb[0], rgb[1], rgb[2]])
         rgb_grid.append(row)

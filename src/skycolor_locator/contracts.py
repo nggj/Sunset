@@ -108,6 +108,19 @@ class PeriodicSurfaceConstants:
     meta: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(slots=True, frozen=True)
+class CameraProfile:
+    """Camera/view configuration used to sample observer frustum."""
+
+    fov_h_deg: float = 90.0
+    fov_v_deg: float = 60.0
+    yaw_deg: float = 0.0
+    pitch_deg: float = 0.0
+    roll_deg: float = 0.0
+    exposure_ev: float = 0.0
+    lens_model: str = "pinhole"
+
+
 @dataclass(slots=True)
 class ColorSignature:
     """Color signature contract containing sky/ground histograms and metadata."""
