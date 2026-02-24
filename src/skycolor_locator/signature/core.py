@@ -4,11 +4,17 @@ from __future__ import annotations
 
 from colorsys import rgb_to_hsv
 from datetime import datetime
-from math import floor
+from math import asin, atan2, cos, floor, pi, radians, sin, sqrt, tan
 from typing import Any
 
 from skycolor_locator.astro.solar import solar_position
-from skycolor_locator.contracts import AtmosphereState, ColorSignature, SurfaceClass, SurfaceState
+from skycolor_locator.contracts import (
+    AtmosphereState,
+    CameraProfile,
+    ColorSignature,
+    SurfaceClass,
+    SurfaceState,
+)
 from skycolor_locator.ml.features import featurize
 from skycolor_locator.ml.residual_model import ResidualHistogramModel
 from skycolor_locator.sky.analytic import render_sky_rgb
@@ -21,6 +27,91 @@ _LOW_SUN_ELEV_DEG = 10.0
 _CLOUDY_FRACTION_THRESHOLD = 0.6
 _CLOUD_OPTICAL_DEPTH_THRESHOLD = 10.0
 
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _normalize_vec3(x: float, y: float, z: float) -> tuple[float, float, float]:
+    norm = sqrt(x * x + y * y + z * z)
+    if norm <= 1e-12:
+        return (0.0, 0.0, 1.0)
+    return (x / norm, y / norm, z / norm)
+
+
+def _sample_sky_bilinear(
+    sky_rgb: list[list[list[float]]], az_rad: float, elev_rad: float
+) -> list[float]:
+    n_el = len(sky_rgb)
+    n_az = len(sky_rgb[0])
+
+    az_norm = az_rad % (2.0 * pi)
+    elev_clamped = _clamp(elev_rad, 0.0, pi / 2.0)
+
+    az_pos = az_norm / (2.0 * pi) * n_az
+    el_pos = elev_clamped / (pi / 2.0) * max(n_el - 1, 1)
+
+    j0 = int(floor(az_pos)) % n_az
+    j1 = (j0 + 1) % n_az
+    i0 = int(floor(el_pos))
+    i1 = min(i0 + 1, n_el - 1)
+
+    tx = az_pos - floor(az_pos)
+    ty = el_pos - floor(el_pos)
+
+    c00 = sky_rgb[i0][j0]
+    c10 = sky_rgb[i0][j1]
+    c01 = sky_rgb[i1][j0]
+    c11 = sky_rgb[i1][j1]
+
+    return [
+        (1.0 - tx) * (1.0 - ty) * c00[k]
+        + tx * (1.0 - ty) * c10[k]
+        + (1.0 - tx) * ty * c01[k]
+        + tx * ty * c11[k]
+        for k in range(3)
+    ]
+
+
+def _camera_sky_pixels(
+    sky_rgb: list[list[list[float]]],
+    camera: CameraProfile,
+    sample_w: int,
+    sample_h: int,
+) -> list[list[float]]:
+    yaw = radians(camera.yaw_deg)
+    pitch = radians(camera.pitch_deg)
+    roll = radians(camera.roll_deg)
+
+    f = (sin(yaw) * cos(pitch), cos(yaw) * cos(pitch), sin(pitch))
+    r = (cos(yaw), -sin(yaw), 0.0)
+    u = (-sin(pitch) * sin(yaw), -sin(pitch) * cos(yaw), cos(pitch))
+
+    cr = cos(roll)
+    sr = sin(roll)
+    r2 = (r[0] * cr + u[0] * sr, r[1] * cr + u[1] * sr, r[2] * cr + u[2] * sr)
+    u2 = (-r[0] * sr + u[0] * cr, -r[1] * sr + u[1] * cr, -r[2] * sr + u[2] * cr)
+
+    tan_h = tan(radians(max(1.0, camera.fov_h_deg)) / 2.0)
+    tan_v = tan(radians(max(1.0, camera.fov_v_deg)) / 2.0)
+
+    pixels: list[list[float]] = []
+    for iy in range(sample_h):
+        ny = (2.0 * (iy + 0.5) / sample_h - 1.0) * tan_v
+        for ix in range(sample_w):
+            nx = (2.0 * (ix + 0.5) / sample_w - 1.0) * tan_h
+            dx = f[0] + nx * r2[0] + ny * u2[0]
+            dy = f[1] + nx * r2[1] + ny * u2[1]
+            dz = f[2] + nx * r2[2] + ny * u2[2]
+            dx, dy, dz = _normalize_vec3(dx, dy, dz)
+            if dz <= 0.0:
+                continue
+            az = atan2(dx, dy) % (2.0 * pi)
+            elev = asin(_clamp(dz, -1.0, 1.0))
+            pixels.append(_sample_sky_bilinear(sky_rgb, az, elev))
+
+    return pixels
 
 def srgb_to_hsv(rgb: list[float]) -> tuple[float, float, float]:
     """Convert an sRGB pixel (0..1) to HSV."""
@@ -146,6 +237,39 @@ def _allocate_ground_sample_counts(palette: dict[str, float], total_samples: int
     return counts
 
 
+
+def _terrain_horizon_at_azimuth(
+    profile_deg: list[float], az_step_deg: float, azimuth_deg: float
+) -> float:
+    """Interpolate terrain horizon elevation at given azimuth."""
+    if not profile_deg:
+        return 0.0
+    n = len(profile_deg)
+    step = az_step_deg if az_step_deg > 0.0 else (360.0 / n)
+    pos = (azimuth_deg % 360.0) / step
+    i0 = int(floor(pos)) % n
+    i1 = (i0 + 1) % n
+    t = pos - floor(pos)
+    return float((1.0 - t) * profile_deg[i0] + t * profile_deg[i1])
+
+
+def _resolve_terrain_horizon(surface: SurfaceState, cfg: dict[str, Any]) -> tuple[list[float], float]:
+    """Resolve optional terrain-horizon profile from config/surface metadata."""
+    profile_obj = cfg.get("terrain_horizon_profile_deg")
+    step_obj = cfg.get("terrain_horizon_az_step_deg")
+
+    if profile_obj is None:
+        profile_obj = surface.periodic_meta.get("terrain_horizon_profile_deg")
+    if step_obj is None:
+        step_obj = surface.periodic_meta.get("terrain_horizon_az_step_deg")
+
+    if not isinstance(profile_obj, list) or not profile_obj:
+        return [], 0.0
+
+    profile = [float(v) for v in profile_obj]
+    step = float(step_obj) if isinstance(step_obj, (int, float)) else (360.0 / len(profile))
+    return profile, step
+
 def _compute_quality_flags(
     sun_elev_deg: float, atmos: AtmosphereState, turbidity: float
 ) -> list[str]:
@@ -206,12 +330,25 @@ def compute_color_signature(
     n_el = int(cfg.get("n_el", 24))
     smooth_window = int(cfg.get("smooth_window", 3))
     ground_samples = int(cfg.get("ground_samples", 2000))
+    camera_profile = cfg.get("camera_profile")
+    camera = camera_profile if isinstance(camera_profile, CameraProfile) else CameraProfile()
+    frustum_sample_w = int(cfg.get("frustum_sample_w", max(16, int(camera.fov_h_deg))))
+    frustum_sample_h = int(cfg.get("frustum_sample_h", max(12, int(camera.fov_v_deg))))
     apply_residual = bool(cfg.get("apply_residual", False))
     residual_model_obj = cfg.get("residual_model")
     residual_model = residual_model_obj if isinstance(residual_model_obj, ResidualHistogramModel) else None
 
     sky_rgb, sky_meta = render_sky_rgb(dt=dt, lat=lat, lon=lon, atmos=atmos, n_az=n_az, n_el=n_el)
-    sky_hist = hue_histogram(sky_rgb, bins=bins, weight_mode="sv")
+    sky_pixels = _camera_sky_pixels(
+        sky_rgb,
+        camera=camera,
+        sample_w=frustum_sample_w,
+        sample_h=frustum_sample_h,
+    )
+    if sky_pixels:
+        sky_hist = hue_histogram(sky_pixels, bins=bins, weight_mode="sv")
+    else:
+        sky_hist = hue_histogram(sky_rgb, bins=bins, weight_mode="sv")
     sky_hist = smooth_circular(sky_hist, window=smooth_window)
 
     horizon = sky_rgb[0]
@@ -219,8 +356,17 @@ def compute_color_signature(
 
     palette = _surface_palette(surface)
     albedo = max(0.0, min(1.0, surface.dominant_albedo))
-    _, _, sun_elev_deg = solar_position(dt, lat, lon)
-    illum = max(0.15, min(1.0, 0.2 + max(sun_elev_deg, 0.0) / 90.0))
+    _, saz_deg, sun_elev_deg = solar_position(dt, lat, lon)
+    terrain_profile, terrain_az_step = _resolve_terrain_horizon(surface, cfg)
+    terrain_horizon_deg = _terrain_horizon_at_azimuth(
+        terrain_profile,
+        terrain_az_step,
+        saz_deg,
+    ) if terrain_profile else 0.0
+    terrain_occluded = bool(terrain_profile) and sun_elev_deg <= terrain_horizon_deg
+    effective_sun_elev_deg = sun_elev_deg - max(terrain_horizon_deg, 0.0)
+
+    illum = max(0.15, min(1.0, 0.2 + max(effective_sun_elev_deg, 0.0) / 90.0))
     haze = max(
         0.0, min(0.85, 0.15 + 0.55 * atmos.cloud_fraction + 0.2 * atmos.aerosol_optical_depth)
     )
@@ -239,24 +385,46 @@ def compute_color_signature(
     ground_hist = hue_histogram(ground_pixels, bins=bins, weight_mode="sv")
     ground_hist = smooth_circular(ground_hist, window=smooth_window)
 
-    signature = sky_hist + ground_hist
+    terrain_sky_penalty = 0.0
+    if terrain_profile:
+        mean_horizon = sum(max(0.0, h) for h in terrain_profile) / len(terrain_profile)
+        terrain_sky_penalty = _clamp(mean_horizon / 90.0, 0.0, 0.25)
+    sky_weight = _clamp(0.5 + camera.pitch_deg / 180.0 - terrain_sky_penalty, 0.05, 0.95)
+    ground_weight = 1.0 - sky_weight
+    signature = [sky_weight * value for value in sky_hist] + [
+        ground_weight * value for value in ground_hist
+    ]
     hue_bins = [i / bins for i in range(bins)]
 
     cloud = max(0.0, min(1.0, atmos.cloud_fraction))
     turbidity = float(sky_meta.get("turbidity", 3.0))
     uncertainty_score = max(0.0, min(1.0, 0.15 + 0.45 * cloud + 0.05 * turbidity / 10.0))
     quality_flags = _compute_quality_flags(
-        sun_elev_deg=sun_elev_deg, atmos=atmos, turbidity=turbidity
+        sun_elev_deg=effective_sun_elev_deg, atmos=atmos, turbidity=turbidity
     )
+    if terrain_occluded and "terrain_occluded_sun" not in quality_flags:
+        quality_flags.append("terrain_occluded_sun")
 
     meta: dict[str, Any] = {
         "sun_elev_deg": sun_elev_deg,
+        "effective_sun_elev_deg": effective_sun_elev_deg,
+        "terrain_horizon_deg": terrain_horizon_deg,
+        "terrain_occluded_sun": terrain_occluded,
         "sza_deg": sky_meta.get("sza_deg"),
         "saz_deg": sky_meta.get("saz_deg"),
         "turbidity": turbidity,
         "quality_flags": quality_flags,
         "uncertainty_score": uncertainty_score,
         "ground_sample_count": len(ground_pixels),
+        "camera_profile": {
+            "fov_h_deg": camera.fov_h_deg,
+            "fov_v_deg": camera.fov_v_deg,
+            "yaw_deg": camera.yaw_deg,
+            "pitch_deg": camera.pitch_deg,
+            "roll_deg": camera.roll_deg,
+            "lens_model": camera.lens_model,
+        },
+        "sky_ground_weights": {"sky": sky_weight, "ground": ground_weight},
     }
 
     baseline = ColorSignature(

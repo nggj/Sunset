@@ -45,6 +45,8 @@ class AtmosphereState:
     visibility_km: float | None = None
     pressure_hpa: float | None = None
     cloud_optical_depth: float | None = None
+    cloud_ice_fraction: float | None = None
+    cloud_effective_radius_um: float | None = None
     missing_realtime: bool = False
 
 
@@ -80,6 +82,19 @@ class PeriodicSurfaceConstants:
     landcover_mix: dict[str, float]
     class_rgb: dict[str, list[float]]
     meta: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True, frozen=True)
+class CameraProfile:
+    """Camera/view configuration used to sample observer frustum."""
+
+    fov_h_deg: float = 90.0
+    fov_v_deg: float = 60.0
+    yaw_deg: float = 0.0
+    pitch_deg: float = 0.0
+    roll_deg: float = 0.0
+    exposure_ev: float = 0.0
+    lens_model: str = "pinhole"
 
 
 @dataclass(slots=True)

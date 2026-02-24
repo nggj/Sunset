@@ -15,6 +15,7 @@ from skycolor_locator.index.bruteforce import BruteforceIndex
 from skycolor_locator.index.store import IndexCacheKey, IndexStore
 from skycolor_locator.ingest.factory import create_earth_provider, create_surface_provider
 from skycolor_locator.orchestrate.batch import GridSpec, generate_lat_lon_grid
+from skycolor_locator.contracts import CameraProfile
 from skycolor_locator.signature.core import compute_color_signature
 from skycolor_locator.ml.residual_model import ResidualHistogramModel
 from skycolor_locator.state.earthstate_resolver import EarthStateResolver
@@ -36,6 +37,26 @@ _DEFAULT_GRID_SPEC = GridSpec(
 )
 
 
+class CameraProfileRequest(BaseModel):
+    """Camera profile for frustum-aware signature sampling."""
+
+    fov_h_deg: float = Field(default=90.0, gt=0.0, le=179.0)
+    fov_v_deg: float = Field(default=60.0, gt=0.0, le=179.0)
+    yaw_deg: float = 0.0
+    pitch_deg: float = Field(default=0.0, ge=-90.0, le=90.0)
+    roll_deg: float = 0.0
+
+    def to_contract(self) -> CameraProfile:
+        """Convert API model to camera profile contract."""
+        return CameraProfile(
+            fov_h_deg=self.fov_h_deg,
+            fov_v_deg=self.fov_v_deg,
+            yaw_deg=self.yaw_deg,
+            pitch_deg=self.pitch_deg,
+            roll_deg=self.roll_deg,
+        )
+
+
 class SignatureRequest(BaseModel):
     """Request schema for generating one signature."""
 
@@ -43,6 +64,7 @@ class SignatureRequest(BaseModel):
     lat: float = Field(ge=-90.0, le=90.0)
     lon: float = Field(ge=-180.0, le=180.0)
     apply_residual: bool = False
+    camera_profile: CameraProfileRequest | None = None
 
 
 class ColorSignatureResponse(BaseModel):
@@ -114,6 +136,7 @@ class SearchRequest(BaseModel):
     metric: Literal["cosine", "emd", "circular_emd"] = "cosine"
     vector_type: Literal["hue_signature", "perceptual_v1"] = "hue_signature"
     apply_residual: bool = False
+    camera_profile: CameraProfileRequest | None = None
     filters: SearchFilters | None = None
 
     @model_validator(mode="after")
@@ -302,6 +325,7 @@ def create_app(provider_mode: str | None = None) -> FastAPI:
             config={
                 "apply_residual": payload.apply_residual,
                 "residual_model": residual_model,
+                "camera_profile": camera,
             },
         )
         return ColorSignatureResponse(**signature.to_dict())
@@ -311,6 +335,7 @@ def create_app(provider_mode: str | None = None) -> FastAPI:
         """Search candidate locations by target signature similarity."""
         query_time, time_bucket = _resolve_time_bucket(payload)
         grid_spec = _normalize_grid_spec(payload.grid_spec)
+        camera = payload.camera_profile.to_contract() if payload.camera_profile else CameraProfile()
 
         if payload.apply_residual and residual_model is None:
             raise HTTPException(status_code=422, detail="residual model is not loaded")
@@ -337,6 +362,7 @@ def create_app(provider_mode: str | None = None) -> FastAPI:
                         "bins": 36,
                         "apply_residual": payload.apply_residual,
                         "residual_model": residual_model,
+                        "camera_profile": camera,
                     },
                 ).signature
             else:
@@ -383,6 +409,7 @@ def create_app(provider_mode: str | None = None) -> FastAPI:
                             "bins": vector_dim // 2,
                             "apply_residual": payload.apply_residual,
                             "residual_model": residual_model,
+                            "camera_profile": camera,
                         },
                     ).signature
                 else:
