@@ -5,6 +5,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
+from skycolor_locator.ingest.gee_providers import GeeEarthStateProvider, GeeSurfaceProvider
+from skycolor_locator.ingest.mock_providers import (
+    MockEarthStateProvider,
+    MockSurfaceProvider,
+)
 
 
 def _client() -> object:
@@ -14,6 +19,11 @@ def _client() -> object:
     from skycolor_locator.api.app import create_app
 
     return testclient_module.TestClient(create_app())
+
+
+def _require_fastapi() -> None:
+    """Skip tests that require FastAPI when dependency is unavailable."""
+    pytest.importorskip("fastapi")
 
 
 def test_signature_endpoint_returns_contract_payload() -> None:
@@ -147,3 +157,37 @@ def test_search_endpoint_metric_affects_cache_key() -> None:
     assert cosine_body["cache_hit"] is False
     assert circular_body["cache_hit"] is False
     assert circular_body["build_count"] == cosine_body["build_count"] + 1
+
+
+def test_create_app_uses_mock_providers_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """create_app should default to deterministic mock providers."""
+    _require_fastapi()
+    monkeypatch.delenv("SKYCOLOR_PROVIDER", raising=False)
+    from skycolor_locator.api.app import create_app
+
+    app = create_app()
+
+    assert app.state.provider_mode == "mock"
+    assert isinstance(app.state.earth_provider, MockEarthStateProvider)
+    assert isinstance(app.state.surface_provider, MockSurfaceProvider)
+
+
+def test_create_app_uses_gee_providers_when_enabled() -> None:
+    """create_app should allow runtime provider mode switching to GEE."""
+    _require_fastapi()
+    from skycolor_locator.api.app import create_app
+
+    app = create_app(provider_mode="gee")
+
+    assert app.state.provider_mode == "gee"
+    assert isinstance(app.state.earth_provider, GeeEarthStateProvider)
+    assert isinstance(app.state.surface_provider, GeeSurfaceProvider)
+
+
+def test_create_app_rejects_invalid_provider_mode() -> None:
+    """create_app should reject unsupported provider mode values."""
+    _require_fastapi()
+    from skycolor_locator.api.app import create_app
+
+    with pytest.raises(ValueError, match="SKYCOLOR_PROVIDER"):
+        create_app(provider_mode="invalid")
