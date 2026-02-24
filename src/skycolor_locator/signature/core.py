@@ -8,10 +8,11 @@ from math import floor
 from typing import Any
 
 from skycolor_locator.astro.solar import solar_position
-from skycolor_locator.contracts import AtmosphereState, ColorSignature, SurfaceClass, SurfaceState
+from skycolor_locator.contracts import AtmosphereState, CameraProfile, ColorSignature, SurfaceClass, SurfaceState
 from skycolor_locator.ml.features import featurize
 from skycolor_locator.ml.residual_model import ResidualHistogramModel
 from skycolor_locator.sky.analytic import render_sky_rgb
+from skycolor_locator.view.fov import sample_sky_in_camera_view
 
 # Spec-minimum quality-flag thresholds.
 # - is_night: sun elevation <= 0° (below or on horizon)
@@ -211,7 +212,28 @@ def compute_color_signature(
     residual_model = residual_model_obj if isinstance(residual_model_obj, ResidualHistogramModel) else None
 
     sky_rgb, sky_meta = render_sky_rgb(dt=dt, lat=lat, lon=lon, atmos=atmos, n_az=n_az, n_el=n_el)
-    sky_hist = hue_histogram(sky_rgb, bins=bins, weight_mode="sv")
+
+    camera_cfg = cfg.get("camera_profile")
+    camera_profile: CameraProfile | None
+    if isinstance(camera_cfg, CameraProfile):
+        camera_profile = camera_cfg
+    elif isinstance(camera_cfg, dict):
+        camera_profile = CameraProfile(**camera_cfg)
+    else:
+        camera_profile = None
+
+    sky_pixels: list[list[float]] | None = None
+    ground_pixel_count_from_view = 0
+    if camera_profile is not None:
+        _, sky_pixels, ground_pixel_count_from_view = sample_sky_in_camera_view(
+            sky_rgb=sky_rgb,
+            n_az=n_az,
+            n_el=n_el,
+            camera=camera_profile,
+        )
+        sky_hist = hue_histogram(sky_pixels, bins=bins, weight_mode="sv")
+    else:
+        sky_hist = hue_histogram(sky_rgb, bins=bins, weight_mode="sv")
     sky_hist = smooth_circular(sky_hist, window=smooth_window)
 
     horizon = sky_rgb[0]
@@ -249,6 +271,23 @@ def compute_color_signature(
         sun_elev_deg=sun_elev_deg, atmos=atmos, turbidity=turbidity
     )
 
+    total_view_pixels = 0
+    sky_fraction = 1.0
+    ground_fraction = 1.0
+    if camera_profile is not None and sky_pixels is not None:
+        total_view_pixels = len(sky_pixels) + ground_pixel_count_from_view
+        if total_view_pixels > 0:
+            sky_fraction = len(sky_pixels) / total_view_pixels
+            ground_fraction = ground_pixel_count_from_view / total_view_pixels
+        else:
+            sky_fraction = 0.0
+            ground_fraction = 0.0
+
+        if len(sky_pixels) == 0 and "no_sky" not in quality_flags:
+            quality_flags.append("no_sky")
+        if ground_fraction <= 1e-9 and "no_ground" not in quality_flags:
+            quality_flags.append("no_ground")
+
     meta: dict[str, Any] = {
         "sun_elev_deg": sun_elev_deg,
         "sza_deg": sky_meta.get("sza_deg"),
@@ -257,6 +296,8 @@ def compute_color_signature(
         "quality_flags": quality_flags,
         "uncertainty_score": uncertainty_score,
         "ground_sample_count": len(ground_pixels),
+        "sky_fraction": sky_fraction,
+        "ground_fraction": ground_fraction,
     }
 
     baseline = ColorSignature(
