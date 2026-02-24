@@ -17,6 +17,7 @@ from skycolor_locator.ingest.factory import create_earth_provider, create_surfac
 from skycolor_locator.orchestrate.batch import GridSpec, generate_lat_lon_grid
 from skycolor_locator.contracts import CameraProfile
 from skycolor_locator.signature.core import compute_color_signature
+from skycolor_locator.contracts import CameraProfile
 from skycolor_locator.ml.residual_model import ResidualHistogramModel
 from skycolor_locator.state.earthstate_resolver import EarthStateResolver
 from skycolor_locator.state.earthstate_store import SQLiteEarthStateStore
@@ -37,25 +38,22 @@ _DEFAULT_GRID_SPEC = GridSpec(
 )
 
 
-class CameraProfileRequest(BaseModel):
-    """Camera profile for frustum-aware signature sampling."""
 
-    fov_h_deg: float = Field(default=90.0, gt=0.0, le=179.0)
-    fov_v_deg: float = Field(default=60.0, gt=0.0, le=179.0)
+
+class CameraProfileRequest(BaseModel):
+    """Request camera field-of-view/orientation profile."""
+
+    hfov_deg: float = 70.0
+    vfov_deg: float = 45.0
     yaw_deg: float = 0.0
-    pitch_deg: float = Field(default=0.0, ge=-90.0, le=90.0)
+    pitch_deg: float = 0.0
     roll_deg: float = 0.0
+    sample_width: int = 64
+    sample_height: int = 40
 
     def to_contract(self) -> CameraProfile:
-        """Convert API model to camera profile contract."""
-        return CameraProfile(
-            fov_h_deg=self.fov_h_deg,
-            fov_v_deg=self.fov_v_deg,
-            yaw_deg=self.yaw_deg,
-            pitch_deg=self.pitch_deg,
-            roll_deg=self.roll_deg,
-        )
-
+        """Convert API model into CameraProfile contract."""
+        return CameraProfile(**self.model_dump())
 
 class SignatureRequest(BaseModel):
     """Request schema for generating one signature."""
@@ -64,7 +62,7 @@ class SignatureRequest(BaseModel):
     lat: float = Field(ge=-90.0, le=90.0)
     lon: float = Field(ge=-180.0, le=180.0)
     apply_residual: bool = False
-    camera_profile: CameraProfileRequest | None = None
+    camera: CameraProfileRequest | None = None
 
 
 class ColorSignatureResponse(BaseModel):
@@ -136,7 +134,7 @@ class SearchRequest(BaseModel):
     metric: Literal["cosine", "emd", "circular_emd"] = "cosine"
     vector_type: Literal["hue_signature", "perceptual_v1"] = "hue_signature"
     apply_residual: bool = False
-    camera_profile: CameraProfileRequest | None = None
+    camera: CameraProfileRequest | None = None
     filters: SearchFilters | None = None
 
     @model_validator(mode="after")
@@ -290,6 +288,22 @@ def _build_providers(
     )
     return (earth_resolver, surface_resolver)
 
+    periodic_store_path = os.getenv("SKYCOLOR_PERIODIC_STORE_PATH")
+    periodic_store = SQLitePeriodicConstantsStore(periodic_store_path) if periodic_store_path else None
+    periodic_resolver = PeriodicConstantsResolver(
+        store=periodic_store,
+        builder_enabled=os.getenv("SKYCOLOR_ENABLE_S2_PERIODIC_BUILDER", "0") == "1",
+        tile_step_deg=tile_step_deg,
+        provider_mode=provider_mode,
+        writeback=periodic_store is not None,
+    )
+
+    surface_resolver = SurfaceStateResolver(
+        base_provider=base_surface_provider,
+        periodic=periodic_resolver,
+    )
+    return (earth_resolver, surface_resolver)
+
 
 def create_app(provider_mode: str | None = None) -> FastAPI:
     """Create and configure the FastAPI app."""
@@ -325,7 +339,7 @@ def create_app(provider_mode: str | None = None) -> FastAPI:
             config={
                 "apply_residual": payload.apply_residual,
                 "residual_model": residual_model,
-                "camera_profile": camera,
+                "camera_profile": payload.camera.to_contract() if payload.camera else None,
             },
         )
         return ColorSignatureResponse(**signature.to_dict())
@@ -362,7 +376,7 @@ def create_app(provider_mode: str | None = None) -> FastAPI:
                         "bins": 36,
                         "apply_residual": payload.apply_residual,
                         "residual_model": residual_model,
-                        "camera_profile": camera,
+                        "camera_profile": payload.camera.to_contract() if payload.camera else None,
                     },
                 ).signature
             else:
@@ -372,6 +386,9 @@ def create_app(provider_mode: str | None = None) -> FastAPI:
                     payload.target_lon,
                     target_atmos,
                     target_surface,
+                    config={
+                        "camera_profile": payload.camera.to_contract() if payload.camera else None,
+                    },
                 )
 
         if payload.vector_type == "hue_signature" and len(target_vector) % 2 != 0:
@@ -409,12 +426,19 @@ def create_app(provider_mode: str | None = None) -> FastAPI:
                             "bins": vector_dim // 2,
                             "apply_residual": payload.apply_residual,
                             "residual_model": residual_model,
-                            "camera_profile": camera,
+                            "camera_profile": payload.camera.to_contract() if payload.camera else None,
                         },
                     ).signature
                 else:
                     candidate_vector, _ = compute_perceptual_v1(
-                        query_time, lat, lon, atmos, surface
+                        query_time,
+                        lat,
+                        lon,
+                        atmos,
+                        surface,
+                        config={
+                            "camera_profile": payload.camera.to_contract() if payload.camera else None,
+                        },
                     )
 
                 if len(candidate_vector) != vector_dim:

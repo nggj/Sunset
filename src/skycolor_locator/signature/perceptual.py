@@ -8,8 +8,9 @@ from math import floor, sqrt
 from typing import Any
 
 from skycolor_locator.astro.solar import solar_position
-from skycolor_locator.contracts import AtmosphereState, SurfaceClass, SurfaceState
+from skycolor_locator.contracts import AtmosphereState, CameraProfile, SurfaceClass, SurfaceState
 from skycolor_locator.sky.analytic import render_sky_rgb
+from skycolor_locator.view.fov import sample_sky_in_camera_view
 
 H_BINS = 36
 S_BINS = 8
@@ -235,7 +236,10 @@ def _build_ground_pixels(
 
 
 def compute_perceptual_v1_from_buffers(
-    sky_rgb: list[list[list[float]]], ground_pixels: list[list[float]]
+    sky_rgb: list[list[list[float]]],
+    ground_pixels: list[list[float]],
+    view_grid: list[list[list[float] | None]] | None = None,
+    no_ground: bool = False,
 ) -> tuple[list[float], dict[str, Any]]:
     """Compute perceptual_v1 feature vector from precomputed sky/ground buffers."""
     if not sky_rgb or not sky_rgb[0]:
@@ -253,7 +257,17 @@ def compute_perceptual_v1_from_buffers(
         band_sizes.append(len(band_pixels))
         band_features.extend(hue_histogram_from_pixels(band_pixels, bins=H_BINS, weight_mode="sv"))
 
-    sky_pixels = flatten_sky_pixels(sky_rgb)
+    if view_grid is None:
+        sky_pixels = flatten_sky_pixels(sky_rgb)
+        row_luma = [_mean([luma(pixel) for pixel in row]) for row in sky_rgb]
+    else:
+        sky_pixels = [pixel for row in view_grid for pixel in row if pixel is not None]
+        row_luma = [
+            _mean([luma(pixel) for pixel in row if pixel is not None])
+            for row in view_grid
+            if any(pixel is not None for pixel in row)
+        ]
+
     sky_hsv = [srgb_to_hsv(pixel) for pixel in sky_pixels]
     sky_sat = [s for _, s, _ in sky_hsv]
     sky_val = [v for _, _, v in sky_hsv]
@@ -261,7 +275,6 @@ def compute_perceptual_v1_from_buffers(
     sky_sat_hist = histogram_1d(sky_sat, bins=S_BINS, value_range=(0.0, 1.0), weights=sky_val)
     sky_val_hist = histogram_1d(sky_val, bins=V_BINS, value_range=(0.0, 1.0))
 
-    row_luma = [_mean([luma(pixel) for pixel in row]) for row in sky_rgb]
     sky_profile = downsample_profile(row_luma, out_bins=PROFILE_BINS)
 
     sky_lumas = [luma(pixel) for pixel in sky_pixels]
@@ -269,26 +282,34 @@ def compute_perceptual_v1_from_buffers(
     sky_luma_p90_minus_p10 = _percentile(sky_lumas, 0.9) - _percentile(sky_lumas, 0.1)
     sky_colorfulness = colorfulness_metric(sky_pixels)
 
-    ground_hsv = [srgb_to_hsv(pixel) for pixel in ground_pixels]
-    ground_hues = [h for h, _, _ in ground_hsv]
-    ground_sat = [s for _, s, _ in ground_hsv]
-    ground_val = [v for _, _, v in ground_hsv]
+    if no_ground:
+        ground_hue_hist = [1.0 / H_BINS] * H_BINS
+        ground_sat_hist = [1.0 / S_BINS] * S_BINS
+        ground_val_hist = [1.0 / V_BINS] * V_BINS
+        ground_luma_mean = 0.0
+        ground_luma_std = 0.0
+        ground_colorfulness = 0.0
+    else:
+        ground_hsv = [srgb_to_hsv(pixel) for pixel in ground_pixels]
+        ground_hues = [h for h, _, _ in ground_hsv]
+        ground_sat = [s for _, s, _ in ground_hsv]
+        ground_val = [v for _, _, v in ground_hsv]
 
-    ground_hue_hist = histogram_1d(
-        ground_hues,
-        bins=H_BINS,
-        value_range=(0.0, 1.0),
-        weights=[s * v for _, s, v in ground_hsv],
-    )
-    ground_sat_hist = histogram_1d(
-        ground_sat, bins=S_BINS, value_range=(0.0, 1.0), weights=ground_val
-    )
-    ground_val_hist = histogram_1d(ground_val, bins=V_BINS, value_range=(0.0, 1.0))
+        ground_hue_hist = histogram_1d(
+            ground_hues,
+            bins=H_BINS,
+            value_range=(0.0, 1.0),
+            weights=[s * v for _, s, v in ground_hsv],
+        )
+        ground_sat_hist = histogram_1d(
+            ground_sat, bins=S_BINS, value_range=(0.0, 1.0), weights=ground_val
+        )
+        ground_val_hist = histogram_1d(ground_val, bins=V_BINS, value_range=(0.0, 1.0))
 
-    ground_lumas = [luma(pixel) for pixel in ground_pixels]
-    ground_luma_mean = _mean(ground_lumas)
-    ground_luma_std = _std(ground_lumas)
-    ground_colorfulness = colorfulness_metric(ground_pixels)
+        ground_lumas = [luma(pixel) for pixel in ground_pixels]
+        ground_luma_mean = _mean(ground_lumas)
+        ground_luma_std = _std(ground_lumas)
+        ground_colorfulness = colorfulness_metric(ground_pixels)
 
     raw = (
         band_features
@@ -311,6 +332,7 @@ def compute_perceptual_v1_from_buffers(
             "sky_rows": n_el,
             "ground_pixel_count": len(ground_pixels),
         },
+        "no_ground": no_ground,
     }
     return vector, meta
 
@@ -330,8 +352,33 @@ def compute_perceptual_v1(
     ground_samples = int(cfg.get("ground_samples", 2000))
 
     sky_rgb, sky_meta = render_sky_rgb(dt=dt, lat=lat, lon=lon, atmos=atmos, n_az=n_az, n_el=n_el)
+
+    camera_cfg = cfg.get("camera_profile")
+    camera_profile: CameraProfile | None
+    if isinstance(camera_cfg, CameraProfile):
+        camera_profile = camera_cfg
+    elif isinstance(camera_cfg, dict):
+        camera_profile = CameraProfile(**camera_cfg)
+    else:
+        camera_profile = None
+
     horizon = sky_rgb[0]
     horizon_color = [sum(pixel[c] for pixel in horizon) / len(horizon) for c in range(3)]
+
+    view_grid: list[list[list[float] | None]] | None = None
+    ground_fraction = 1.0
+    no_ground = False
+    if camera_profile is not None:
+        view_grid, sky_pixels_view, ground_count = sample_sky_in_camera_view(
+            sky_rgb=sky_rgb,
+            n_az=n_az,
+            n_el=n_el,
+            camera=camera_profile,
+        )
+        total = len(sky_pixels_view) + ground_count
+        ground_fraction = (ground_count / total) if total > 0 else 0.0
+        no_ground = ground_fraction <= 1e-9
+
     ground_pixels = _build_ground_pixels(
         dt=dt,
         lat=lat,
@@ -342,13 +389,21 @@ def compute_perceptual_v1(
         ground_samples=ground_samples,
     )
 
-    vector, meta = compute_perceptual_v1_from_buffers(sky_rgb, ground_pixels)
+    vector, meta = compute_perceptual_v1_from_buffers(
+        sky_rgb,
+        ground_pixels,
+        view_grid=view_grid,
+        no_ground=no_ground,
+    )
     _, _, sun_elev_deg = solar_position(dt, lat, lon)
     meta.update(
         {
             "sun_elev_deg": sun_elev_deg,
             "turbidity": sky_meta.get("turbidity"),
             "sza_deg": sky_meta.get("sza_deg"),
+            "ground_fraction": ground_fraction,
         }
     )
+    if no_ground:
+        meta["quality_flag"] = "no_ground"
     return vector, meta

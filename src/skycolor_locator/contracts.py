@@ -61,6 +61,20 @@ class SurfaceClass(StrEnum):
     FOREST = "forest"
 
 
+
+
+@dataclass(slots=True)
+class CameraProfile:
+    """Camera field-of-view and orientation sampling profile."""
+
+    hfov_deg: float = 70.0
+    vfov_deg: float = 45.0
+    yaw_deg: float = 0.0
+    pitch_deg: float = 0.0
+    roll_deg: float = 0.0
+    sample_width: int = 64
+    sample_height: int = 40
+
 @dataclass(slots=True)
 class SurfaceState:
     """Surface characteristics used by the signature kernel."""
