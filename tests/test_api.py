@@ -267,3 +267,27 @@ def test_create_app_rejects_invalid_provider_mode() -> None:
 
     with pytest.raises(ValueError, match="SKYCOLOR_PROVIDER"):
         create_app(provider_mode="invalid")
+
+
+def test_signature_endpoint_accepts_camera_profile() -> None:
+    """`POST /signature` should accept camera profile fields in request payload."""
+    client = _client()
+
+    response = client.post(
+        "/signature",
+        json={
+            "time_utc": datetime(2024, 3, 20, 12, 0, tzinfo=timezone.utc).isoformat(),
+            "lat": 37.5665,
+            "lon": 126.9780,
+            "camera_profile": {
+                "fov_h_deg": 80.0,
+                "fov_v_deg": 50.0,
+                "yaw_deg": 15.0,
+                "pitch_deg": 10.0,
+                "roll_deg": 0.0,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert "camera_profile" in response.json()["meta"]

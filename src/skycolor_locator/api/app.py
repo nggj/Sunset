@@ -15,6 +15,7 @@ from skycolor_locator.index.bruteforce import BruteforceIndex
 from skycolor_locator.index.store import IndexCacheKey, IndexStore
 from skycolor_locator.ingest.factory import create_earth_provider, create_surface_provider
 from skycolor_locator.orchestrate.batch import GridSpec, generate_lat_lon_grid
+from skycolor_locator.contracts import CameraProfile
 from skycolor_locator.signature.core import compute_color_signature
 from skycolor_locator.contracts import CameraProfile
 from skycolor_locator.ml.residual_model import ResidualHistogramModel
@@ -287,6 +288,22 @@ def _build_providers(
     )
     return (earth_resolver, surface_resolver)
 
+    periodic_store_path = os.getenv("SKYCOLOR_PERIODIC_STORE_PATH")
+    periodic_store = SQLitePeriodicConstantsStore(periodic_store_path) if periodic_store_path else None
+    periodic_resolver = PeriodicConstantsResolver(
+        store=periodic_store,
+        builder_enabled=os.getenv("SKYCOLOR_ENABLE_S2_PERIODIC_BUILDER", "0") == "1",
+        tile_step_deg=tile_step_deg,
+        provider_mode=provider_mode,
+        writeback=periodic_store is not None,
+    )
+
+    surface_resolver = SurfaceStateResolver(
+        base_provider=base_surface_provider,
+        periodic=periodic_resolver,
+    )
+    return (earth_resolver, surface_resolver)
+
 
 def create_app(provider_mode: str | None = None) -> FastAPI:
     """Create and configure the FastAPI app."""
@@ -332,6 +349,7 @@ def create_app(provider_mode: str | None = None) -> FastAPI:
         """Search candidate locations by target signature similarity."""
         query_time, time_bucket = _resolve_time_bucket(payload)
         grid_spec = _normalize_grid_spec(payload.grid_spec)
+        camera = payload.camera_profile.to_contract() if payload.camera_profile else CameraProfile()
 
         if payload.apply_residual and residual_model is None:
             raise HTTPException(status_code=422, detail="residual model is not loaded")
