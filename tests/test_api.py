@@ -11,6 +11,9 @@ from skycolor_locator.ingest.mock_providers import (
     MockEarthStateProvider,
     MockSurfaceProvider,
 )
+from skycolor_locator.ingest.periodic_precomputed_provider import (
+    PrecomputedPeriodicConstantsProvider,
+)
 from skycolor_locator.ingest.precomputed_providers import (
     PrecomputedEarthStateProvider,
     PrecomputedSurfaceProvider,
@@ -215,14 +218,32 @@ def test_create_app_uses_precomputed_gee_providers_when_enabled(
             ]
         )
     )
+    periodic_path = tmp_path / "periodic.json"
+    periodic_path.write_text(
+        json.dumps(
+            [
+                {
+                    "tile_id": "step0.0500:lat37.5500:lon126.9500",
+                    "period_start_utc": "2024-05-01T00:00:00+00:00",
+                    "period_end_utc": "2024-05-31T23:59:59+00:00",
+                    "landcover_mix": {"urban": 0.8, "land": 0.2},
+                    "class_rgb": {"urban": [0.7, 0.7, 0.7]},
+                    "meta": {"source": "s2_dynamic_world"},
+                }
+            ]
+        )
+    )
+
     monkeypatch.setenv("SKYCOLOR_GEE_EARTHSTATE_PATH", str(earth_path))
     monkeypatch.setenv("SKYCOLOR_GEE_SURFACE_PATH", str(surface_path))
+    monkeypatch.setenv("SKYCOLOR_GEE_PERIODIC_PATH", str(periodic_path))
 
     app = create_app(provider_mode="gee")
 
     assert app.state.provider_mode == "gee"
     assert isinstance(app.state.earth_provider, PrecomputedEarthStateProvider)
     assert isinstance(app.state.surface_provider, PrecomputedSurfaceProvider)
+    assert isinstance(app.state.periodic_constants_provider, PrecomputedPeriodicConstantsProvider)
 
 
 def test_create_app_gee_mode_requires_snapshot_paths(
