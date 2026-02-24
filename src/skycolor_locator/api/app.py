@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
@@ -35,6 +35,7 @@ from skycolor_locator.orchestrate.batch import GridSpec, generate_lat_lon_grid
 from skycolor_locator.contracts import CameraProfile
 from skycolor_locator.signature.core import compute_color_signature
 from skycolor_locator.ml.residual_model import ResidualHistogramModel
+from skycolor_locator.time.bucketing import bucket_start_utc
 from skycolor_locator.signature.perceptual import compute_perceptual_v1
 
 _MODEL_VERSION = "mvp-v1"
@@ -232,22 +233,14 @@ def _resolve_time_bucket(payload: SearchRequest) -> tuple[datetime, str]:
         start = _normalize_time(payload.window_start_utc)
         end = _normalize_time(payload.window_end_utc or payload.window_start_utc)
         midpoint = start + (end - start) / 2
-        bucket_start = start - timedelta(
-            minutes=start.minute % payload.bucket_minutes,
-            seconds=start.second,
-            microseconds=start.microsecond,
-        )
+        bucket_start = bucket_start_utc(start, payload.bucket_minutes)
         return midpoint, (
             f"window:{bucket_start.isoformat()}:{int((end - start).total_seconds())}:"
             f"{payload.bucket_minutes}m"
         )
 
     dt = _normalize_time(payload.time_utc)
-    bucket_start = dt - timedelta(
-        minutes=dt.minute % payload.bucket_minutes,
-        seconds=dt.second,
-        microseconds=dt.microsecond,
-    )
+    bucket_start = bucket_start_utc(dt, payload.bucket_minutes)
     return dt, f"time:{bucket_start.isoformat()}:{payload.bucket_minutes}m"
 
 
