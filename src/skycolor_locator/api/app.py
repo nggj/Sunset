@@ -13,28 +13,16 @@ from pydantic import BaseModel, Field, model_validator
 
 from skycolor_locator.index.bruteforce import BruteforceIndex
 from skycolor_locator.index.store import IndexCacheKey, IndexStore
-from skycolor_locator.ingest.interfaces import (
-    EarthStateProvider,
-    PeriodicConstantsProvider,
-    SurfaceProvider,
-)
-from skycolor_locator.ingest.mock_providers import (
-    MockEarthStateProvider,
-    MockPeriodicConstantsProvider,
-    MockSurfaceProvider,
-)
-from skycolor_locator.ingest.periodic_precomputed_provider import (
-    PrecomputedPeriodicConstantsProvider,
-)
-from skycolor_locator.ingest.precomputed_providers import (
-    PrecomputedEarthStateProvider,
-    PrecomputedSurfaceProvider,
-)
-from skycolor_locator.ingest.surface_enrichment import merge_surface_with_periodic
+from skycolor_locator.ingest.factory import create_earth_provider, create_surface_provider
 from skycolor_locator.orchestrate.batch import GridSpec, generate_lat_lon_grid
 from skycolor_locator.contracts import CameraProfile
 from skycolor_locator.signature.core import compute_color_signature
 from skycolor_locator.ml.residual_model import ResidualHistogramModel
+from skycolor_locator.state.earthstate_resolver import EarthStateResolver
+from skycolor_locator.state.earthstate_store import SQLiteEarthStateStore
+from skycolor_locator.state.periodic_resolver import PeriodicConstantsResolver
+from skycolor_locator.state.periodic_store import SQLitePeriodicConstantsStore
+from skycolor_locator.state.surface_resolver import SurfaceStateResolver
 from skycolor_locator.time.bucketing import bucket_start_utc
 from skycolor_locator.signature.perceptual import compute_perceptual_v1
 
@@ -268,39 +256,39 @@ def _resolve_provider_mode(provider_mode: str | None) -> Literal["mock", "gee"]:
 
 def _build_providers(
     provider_mode: Literal["mock", "gee"],
-) -> tuple[EarthStateProvider, SurfaceProvider, PeriodicConstantsProvider]:
-    """Build ingest providers for the configured runtime mode."""
-    if provider_mode == "gee":
-        earth_path = os.getenv("SKYCOLOR_GEE_EARTHSTATE_PATH")
-        surface_path = os.getenv("SKYCOLOR_GEE_SURFACE_PATH")
-        if not earth_path or not surface_path:
-            raise ValueError(
-                "gee mode requires SKYCOLOR_GEE_EARTHSTATE_PATH and SKYCOLOR_GEE_SURFACE_PATH"
-            )
-        bucket_minutes = int(os.getenv("SKYCOLOR_GEE_BUCKET_MINUTES", "60"))
-        periodic_path = os.getenv("SKYCOLOR_GEE_PERIODIC_PATH")
-        periodic_tile_step_deg = float(os.getenv("SKYCOLOR_GEE_PERIODIC_TILE_STEP_DEG", "0.05"))
-        periodic_provider: PeriodicConstantsProvider
-        if periodic_path:
-            periodic_provider = PrecomputedPeriodicConstantsProvider(
-                dataset_path=periodic_path,
-                tile_step_deg=periodic_tile_step_deg,
-            )
-        else:
-            periodic_provider = MockPeriodicConstantsProvider()
-        return (
-            PrecomputedEarthStateProvider(
-                dataset_path=earth_path,
-                bucket_minutes=bucket_minutes,
-            ),
-            PrecomputedSurfaceProvider(dataset_path=surface_path),
-            periodic_provider,
-        )
-    return (
-        MockEarthStateProvider(),
-        MockSurfaceProvider(),
-        MockPeriodicConstantsProvider(),
+) -> tuple[EarthStateResolver, SurfaceStateResolver]:
+    """Build EarthState and SurfaceState resolvers for configured runtime mode."""
+    bucket_minutes = int(os.getenv("SKYCOLOR_EARTHSTATE_BUCKET_MINUTES", "60"))
+    tile_step_deg = float(os.getenv("SKYCOLOR_EARTHSTATE_TILE_STEP_DEG", "0.05"))
+    earth_store_path = os.getenv("SKYCOLOR_EARTHSTATE_STORE_PATH")
+
+    earth_provider = create_earth_provider(provider_mode)
+    base_surface_provider = create_surface_provider(provider_mode)
+
+    earth_store = SQLiteEarthStateStore(earth_store_path) if earth_store_path else None
+    earth_resolver = EarthStateResolver(
+        provider=earth_provider,
+        store=earth_store,
+        tile_step_deg=tile_step_deg,
+        bucket_minutes=bucket_minutes,
+        writeback=earth_store is not None,
     )
+
+    periodic_store_path = os.getenv("SKYCOLOR_PERIODIC_STORE_PATH")
+    periodic_store = SQLitePeriodicConstantsStore(periodic_store_path) if periodic_store_path else None
+    periodic_resolver = PeriodicConstantsResolver(
+        store=periodic_store,
+        builder_enabled=os.getenv("SKYCOLOR_ENABLE_S2_PERIODIC_BUILDER", "0") == "1",
+        tile_step_deg=tile_step_deg,
+        provider_mode=provider_mode,
+        writeback=periodic_store is not None,
+    )
+
+    surface_resolver = SurfaceStateResolver(
+        base_provider=base_surface_provider,
+        periodic=periodic_resolver,
+    )
+    return (earth_resolver, surface_resolver)
 
 
 def create_app(provider_mode: str | None = None) -> FastAPI:
@@ -308,13 +296,12 @@ def create_app(provider_mode: str | None = None) -> FastAPI:
     app = FastAPI(title="Skycolor Locator API", version="0.1.0")
 
     mode = _resolve_provider_mode(provider_mode)
-    earth_provider, surface_provider, periodic_provider = _build_providers(mode)
+    earth_resolver, surface_resolver = _build_providers(mode)
     index_store = IndexStore(ttl_seconds=600, max_entries=16)
 
     app.state.provider_mode = mode
-    app.state.earth_provider = earth_provider
-    app.state.surface_provider = surface_provider
-    app.state.periodic_constants_provider = periodic_provider
+    app.state.earth_resolver = earth_resolver
+    app.state.surface_resolver = surface_resolver
 
     residual_model: ResidualHistogramModel | None = None
     residual_model_path = os.getenv("SKYCOLOR_RESIDUAL_MODEL_PATH")
@@ -325,11 +312,8 @@ def create_app(provider_mode: str | None = None) -> FastAPI:
     def post_signature(payload: SignatureRequest) -> ColorSignatureResponse:
         """Generate one color signature for input time/location."""
         dt = _normalize_time(payload.time_utc)
-        camera = payload.camera_profile.to_contract() if payload.camera_profile else CameraProfile()
-        atmos = earth_provider.get_atmosphere_state(dt, payload.lat, payload.lon)
-        surface = surface_provider.get_surface_state(payload.lat, payload.lon)
-        periodic = periodic_provider.get_periodic_surface_constants(dt, payload.lat, payload.lon)
-        surface = merge_surface_with_periodic(surface, periodic)
+        atmos = earth_resolver.get_atmosphere_state(dt, payload.lat, payload.lon)
+        surface = surface_resolver.get_surface_state(dt, payload.lat, payload.lon)
         if payload.apply_residual and residual_model is None:
             raise HTTPException(status_code=422, detail="residual model is not loaded")
         signature = compute_color_signature(
@@ -361,16 +345,12 @@ def create_app(provider_mode: str | None = None) -> FastAPI:
         else:
             target_dt = _normalize_time(payload.target_time_utc)
             assert payload.target_lat is not None and payload.target_lon is not None
-            target_atmos = earth_provider.get_atmosphere_state(
+            target_atmos = earth_resolver.get_atmosphere_state(
                 target_dt, payload.target_lat, payload.target_lon
             )
-            target_surface = surface_provider.get_surface_state(
-                payload.target_lat, payload.target_lon
-            )
-            target_periodic = periodic_provider.get_periodic_surface_constants(
+            target_surface = surface_resolver.get_surface_state(
                 target_dt, payload.target_lat, payload.target_lon
             )
-            target_surface = merge_surface_with_periodic(target_surface, target_periodic)
             if payload.vector_type == "hue_signature":
                 target_vector = compute_color_signature(
                     target_dt,
@@ -416,10 +396,8 @@ def create_app(provider_mode: str | None = None) -> FastAPI:
             keys: list[str] = []
             vectors: list[list[float]] = []
             for lat, lon in generate_lat_lon_grid(grid_spec):
-                atmos = earth_provider.get_atmosphere_state(query_time, lat, lon)
-                surface = surface_provider.get_surface_state(lat, lon)
-                periodic = periodic_provider.get_periodic_surface_constants(query_time, lat, lon)
-                surface = merge_surface_with_periodic(surface, periodic)
+                atmos = earth_resolver.get_atmosphere_state(query_time, lat, lon)
+                surface = surface_resolver.get_surface_state(query_time, lat, lon)
                 if payload.vector_type == "hue_signature":
                     candidate_vector = compute_color_signature(
                         query_time,
