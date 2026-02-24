@@ -13,7 +13,17 @@ from pydantic import BaseModel, Field, model_validator
 
 from skycolor_locator.index.bruteforce import BruteforceIndex
 from skycolor_locator.index.store import IndexCacheKey, IndexStore
-from skycolor_locator.ingest.mock_providers import MockEarthStateProvider, MockSurfaceProvider
+from skycolor_locator.ingest.gee_providers import GeeEarthStateProvider, GeeSurfaceProvider
+from skycolor_locator.ingest.interfaces import (
+    EarthStateProvider,
+    PeriodicConstantsProvider,
+    SurfaceProvider,
+)
+from skycolor_locator.ingest.mock_providers import (
+    MockEarthStateProvider,
+    MockPeriodicConstantsProvider,
+    MockSurfaceProvider,
+)
 from skycolor_locator.orchestrate.batch import GridSpec, generate_lat_lon_grid
 from skycolor_locator.signature.core import compute_color_signature
 from skycolor_locator.ml.residual_model import ResidualHistogramModel
@@ -222,13 +232,42 @@ def _candidate_passes_filters(metadata: dict[str, Any], filters: SearchFilters |
     return True
 
 
-def create_app() -> FastAPI:
+def _resolve_provider_mode(provider_mode: str | None) -> Literal["mock", "gee"]:
+    """Resolve provider mode from argument/environment with validation."""
+    raw = provider_mode or os.getenv("SKYCOLOR_PROVIDER", "mock")
+    mode = raw.strip().lower()
+    if mode == "mock":
+        return "mock"
+    if mode == "gee":
+        return "gee"
+    raise ValueError("SKYCOLOR_PROVIDER must be one of: mock, gee")
+
+
+def _build_providers(
+    provider_mode: Literal["mock", "gee"],
+) -> tuple[EarthStateProvider, SurfaceProvider, PeriodicConstantsProvider]:
+    """Build ingest providers for the configured runtime mode."""
+    if provider_mode == "gee":
+        return GeeEarthStateProvider(), GeeSurfaceProvider(), MockPeriodicConstantsProvider()
+    return (
+        MockEarthStateProvider(),
+        MockSurfaceProvider(),
+        MockPeriodicConstantsProvider(),
+    )
+
+
+def create_app(provider_mode: str | None = None) -> FastAPI:
     """Create and configure the FastAPI app."""
     app = FastAPI(title="Skycolor Locator API", version="0.1.0")
 
-    earth_provider = MockEarthStateProvider()
-    surface_provider = MockSurfaceProvider()
+    mode = _resolve_provider_mode(provider_mode)
+    earth_provider, surface_provider, periodic_provider = _build_providers(mode)
     index_store = IndexStore(ttl_seconds=600, max_entries=16)
+
+    app.state.provider_mode = mode
+    app.state.earth_provider = earth_provider
+    app.state.surface_provider = surface_provider
+    app.state.periodic_constants_provider = periodic_provider
 
     residual_model: ResidualHistogramModel | None = None
     residual_model_path = os.getenv("SKYCOLOR_RESIDUAL_MODEL_PATH")
