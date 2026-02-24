@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from datetime import datetime, timezone
 
 import pytest
+from skycolor_locator.ingest.mock_providers import (
+    MockEarthStateProvider,
+    MockSurfaceProvider,
+)
+from skycolor_locator.ingest.precomputed_providers import (
+    PrecomputedEarthStateProvider,
+    PrecomputedSurfaceProvider,
+)
 
 
 def _client() -> object:
@@ -14,6 +24,11 @@ def _client() -> object:
     from skycolor_locator.api.app import create_app
 
     return testclient_module.TestClient(create_app())
+
+
+def _require_fastapi() -> None:
+    """Skip tests that require FastAPI when dependency is unavailable."""
+    pytest.importorskip("fastapi")
 
 
 def test_signature_endpoint_returns_contract_payload() -> None:
@@ -147,3 +162,87 @@ def test_search_endpoint_metric_affects_cache_key() -> None:
     assert cosine_body["cache_hit"] is False
     assert circular_body["cache_hit"] is False
     assert circular_body["build_count"] == cosine_body["build_count"] + 1
+
+
+def test_create_app_uses_mock_providers_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """create_app should default to deterministic mock providers."""
+    _require_fastapi()
+    monkeypatch.delenv("SKYCOLOR_PROVIDER", raising=False)
+    from skycolor_locator.api.app import create_app
+
+    app = create_app()
+
+    assert app.state.provider_mode == "mock"
+    assert isinstance(app.state.earth_provider, MockEarthStateProvider)
+    assert isinstance(app.state.surface_provider, MockSurfaceProvider)
+
+
+def test_create_app_uses_precomputed_gee_providers_when_enabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """create_app should use precomputed snapshots for gee runtime mode."""
+    _require_fastapi()
+    from skycolor_locator.api.app import create_app
+
+    earth_path = tmp_path / "earth.json"
+    surface_path = tmp_path / "surface.json"
+    earth_path.write_text(
+        json.dumps(
+            [
+                {
+                    "time_bucket_utc": "2024-05-12T09:00:00+00:00",
+                    "lat": 37.566,
+                    "lon": 126.978,
+                    "cloud_fraction": 0.3,
+                    "aerosol_optical_depth": 0.2,
+                    "total_ozone_du": 300.0,
+                }
+            ]
+        )
+    )
+    surface_path.write_text(
+        json.dumps(
+            [
+                {
+                    "lat": 37.566,
+                    "lon": 126.978,
+                    "surface_class": "urban",
+                    "dominant_albedo": 0.2,
+                    "landcover_mix": {"urban": 1.0},
+                    "class_rgb": {},
+                    "periodic_meta": {},
+                }
+            ]
+        )
+    )
+    monkeypatch.setenv("SKYCOLOR_GEE_EARTHSTATE_PATH", str(earth_path))
+    monkeypatch.setenv("SKYCOLOR_GEE_SURFACE_PATH", str(surface_path))
+
+    app = create_app(provider_mode="gee")
+
+    assert app.state.provider_mode == "gee"
+    assert isinstance(app.state.earth_provider, PrecomputedEarthStateProvider)
+    assert isinstance(app.state.surface_provider, PrecomputedSurfaceProvider)
+
+
+def test_create_app_gee_mode_requires_snapshot_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """create_app gee mode should fail fast without precomputed dataset paths."""
+    _require_fastapi()
+    from skycolor_locator.api.app import create_app
+
+    monkeypatch.delenv("SKYCOLOR_GEE_EARTHSTATE_PATH", raising=False)
+    monkeypatch.delenv("SKYCOLOR_GEE_SURFACE_PATH", raising=False)
+
+    with pytest.raises(ValueError, match="SKYCOLOR_GEE_EARTHSTATE_PATH"):
+        create_app(provider_mode="gee")
+
+
+def test_create_app_rejects_invalid_provider_mode() -> None:
+    """create_app should reject unsupported provider mode values."""
+    _require_fastapi()
+    from skycolor_locator.api.app import create_app
+
+    with pytest.raises(ValueError, match="SKYCOLOR_PROVIDER"):
+        create_app(provider_mode="invalid")
