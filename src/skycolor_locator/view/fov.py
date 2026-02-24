@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from math import asin, atan2, cos, radians, sin, sqrt, tan
 
 from skycolor_locator.contracts import CameraProfile
@@ -105,18 +104,12 @@ def az_el_from_world_dir(direction: Vec3) -> tuple[float, float]:
     return az, el
 
 
-def _horizon_el(az_deg: float, horizon_profile: Callable[[float], float] | None) -> float:
-    if horizon_profile is None:
-        return 0.0
-    return float(horizon_profile(az_deg))
-
-
 def sample_sky_in_camera_view(
     sky_rgb: list[list[list[float]]],
     n_az: int,
     n_el: int,
     camera: CameraProfile,
-    horizon_profile: Callable[[float], float] | None = None,
+    horizon_profile: list[float] | None = None,
 ) -> tuple[list[list[list[float] | None]], list[list[float]], int]:
     """Sample sky buffer into camera image grid with ground masking."""
     width = int(camera.sample_width)
@@ -130,7 +123,11 @@ def sample_sky_in_camera_view(
         for i in range(width):
             direction = ray_dir_for_pixel(i, j, width, height, camera)
             az_deg, el_deg = az_el_from_world_dir(direction)
-            if el_deg < _horizon_el(az_deg, horizon_profile):
+            horizon_el = 0.0
+            if horizon_profile is not None and len(horizon_profile) > 0:
+                h_idx = min(int((az_deg / 360.0) * len(horizon_profile)), len(horizon_profile) - 1)
+                horizon_el = float(horizon_profile[h_idx])
+            if el_deg < horizon_el:
                 row.append(None)
                 ground_pixel_count += 1
                 continue

@@ -13,6 +13,7 @@ from skycolor_locator.ml.features import featurize
 from skycolor_locator.ml.residual_model import ResidualHistogramModel
 from skycolor_locator.sky.analytic import render_sky_rgb
 from skycolor_locator.view.fov import sample_sky_in_camera_view
+from skycolor_locator.view.horizon import FlatHorizonModel, HorizonModel
 
 # Spec-minimum quality-flag thresholds.
 # - is_night: sun elevation <= 0° (below or on horizon)
@@ -344,6 +345,14 @@ def compute_color_signature(
     else:
         camera_profile = None
 
+    horizon_model_cfg = cfg.get("horizon_model")
+    horizon_model: HorizonModel
+    if horizon_model_cfg is None:
+        horizon_model = FlatHorizonModel()
+    else:
+        horizon_model = horizon_model_cfg
+    horizon_profile = horizon_model.horizon_profile(lat, lon, n_az)
+
     sky_pixels: list[list[float]] | None = None
     ground_pixel_count_from_view = 0
     if camera_profile is not None:
@@ -352,6 +361,7 @@ def compute_color_signature(
             n_az=n_az,
             n_el=n_el,
             camera=camera_profile,
+            horizon_profile=horizon_profile,
         )
         sky_hist = hue_histogram(sky_pixels, bins=bins, weight_mode="sv")
     else:
@@ -409,8 +419,11 @@ def compute_color_signature(
     quality_flags = _compute_quality_flags(
         sun_elev_deg=effective_sun_elev_deg, atmos=atmos, turbidity=turbidity
     )
-    if terrain_occluded and "terrain_occluded_sun" not in quality_flags:
-        quality_flags.append("terrain_occluded_sun")
+    sun_az = float(sky_meta.get("saz_deg", 0.0)) % 360.0
+    sun_az_idx = min(int((sun_az / 360.0) * n_az), n_az - 1)
+    sun_occluded = sun_elev_deg < float(horizon_profile[sun_az_idx])
+    if sun_occluded and "sun_occluded" not in quality_flags:
+        quality_flags.append("sun_occluded")
 
     total_view_pixels = 0
     sky_fraction = 1.0
@@ -442,6 +455,9 @@ def compute_color_signature(
         "ground_sample_count": len(ground_pixels),
         "sky_fraction": sky_fraction,
         "ground_fraction": ground_fraction,
+        "horizon_elev_max_deg": max(horizon_profile) if horizon_profile else 0.0,
+        "horizon_elev_mean_deg": (sum(horizon_profile) / len(horizon_profile)) if horizon_profile else 0.0,
+        "sun_occluded": sun_occluded,
     }
 
     baseline = ColorSignature(

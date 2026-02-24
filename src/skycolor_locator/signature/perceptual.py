@@ -11,6 +11,7 @@ from skycolor_locator.astro.solar import solar_position
 from skycolor_locator.contracts import AtmosphereState, CameraProfile, SurfaceClass, SurfaceState
 from skycolor_locator.sky.analytic import render_sky_rgb
 from skycolor_locator.view.fov import sample_sky_in_camera_view
+from skycolor_locator.view.horizon import FlatHorizonModel, HorizonModel
 
 H_BINS = 36
 S_BINS = 8
@@ -362,6 +363,14 @@ def compute_perceptual_v1(
     else:
         camera_profile = None
 
+    horizon_model_cfg = cfg.get("horizon_model")
+    horizon_model: HorizonModel
+    if horizon_model_cfg is None:
+        horizon_model = FlatHorizonModel()
+    else:
+        horizon_model = horizon_model_cfg
+    horizon_profile = horizon_model.horizon_profile(lat, lon, n_az)
+
     horizon = sky_rgb[0]
     horizon_color = [sum(pixel[c] for pixel in horizon) / len(horizon) for c in range(3)]
 
@@ -374,6 +383,7 @@ def compute_perceptual_v1(
             n_az=n_az,
             n_el=n_el,
             camera=camera_profile,
+            horizon_profile=horizon_profile,
         )
         total = len(sky_pixels_view) + ground_count
         ground_fraction = (ground_count / total) if total > 0 else 0.0
@@ -396,12 +406,18 @@ def compute_perceptual_v1(
         no_ground=no_ground,
     )
     _, _, sun_elev_deg = solar_position(dt, lat, lon)
+    sun_az = float(sky_meta.get("saz_deg", 0.0)) % 360.0
+    sun_az_idx = min(int((sun_az / 360.0) * n_az), n_az - 1)
+    sun_occluded = sun_elev_deg < float(horizon_profile[sun_az_idx])
     meta.update(
         {
             "sun_elev_deg": sun_elev_deg,
             "turbidity": sky_meta.get("turbidity"),
             "sza_deg": sky_meta.get("sza_deg"),
             "ground_fraction": ground_fraction,
+            "horizon_elev_max_deg": max(horizon_profile) if horizon_profile else 0.0,
+            "horizon_elev_mean_deg": (sum(horizon_profile) / len(horizon_profile)) if horizon_profile else 0.0,
+            "sun_occluded": sun_occluded,
         }
     )
     if no_ground:

@@ -25,6 +25,7 @@ from skycolor_locator.state.periodic_resolver import PeriodicConstantsResolver
 from skycolor_locator.state.periodic_store import SQLitePeriodicConstantsStore
 from skycolor_locator.state.surface_resolver import SurfaceStateResolver
 from skycolor_locator.time.bucketing import bucket_start_utc
+from skycolor_locator.view.horizon import FlatHorizonModel, HorizonModel
 from skycolor_locator.signature.perceptual import compute_perceptual_v1
 
 _MODEL_VERSION = "mvp-v1"
@@ -288,22 +289,18 @@ def _build_providers(
     )
     return (earth_resolver, surface_resolver)
 
-    periodic_store_path = os.getenv("SKYCOLOR_PERIODIC_STORE_PATH")
-    periodic_store = SQLitePeriodicConstantsStore(periodic_store_path) if periodic_store_path else None
-    periodic_resolver = PeriodicConstantsResolver(
-        store=periodic_store,
-        builder_enabled=os.getenv("SKYCOLOR_ENABLE_S2_PERIODIC_BUILDER", "0") == "1",
-        tile_step_deg=tile_step_deg,
-        provider_mode=provider_mode,
-        writeback=periodic_store is not None,
-    )
 
-    surface_resolver = SurfaceStateResolver(
-        base_provider=base_surface_provider,
-        periodic=periodic_resolver,
-    )
-    return (earth_resolver, surface_resolver)
 
+def _build_horizon_model() -> HorizonModel:
+    """Build horizon model from environment flags."""
+    mode = os.getenv("SKYCOLOR_ENABLE_HORIZON_MODEL", "flat").strip().lower()
+    if mode == "flat":
+        return FlatHorizonModel()
+    if mode == "srtm":
+        from skycolor_locator.ingest.horizon_gee import GeeSrtmHorizonModel
+
+        return GeeSrtmHorizonModel()
+    raise ValueError("SKYCOLOR_ENABLE_HORIZON_MODEL must be one of: flat, srtm")
 
 def create_app(provider_mode: str | None = None) -> FastAPI:
     """Create and configure the FastAPI app."""
@@ -312,10 +309,12 @@ def create_app(provider_mode: str | None = None) -> FastAPI:
     mode = _resolve_provider_mode(provider_mode)
     earth_resolver, surface_resolver = _build_providers(mode)
     index_store = IndexStore(ttl_seconds=600, max_entries=16)
+    horizon_model = _build_horizon_model()
 
     app.state.provider_mode = mode
     app.state.earth_resolver = earth_resolver
     app.state.surface_resolver = surface_resolver
+    app.state.horizon_model = horizon_model
 
     residual_model: ResidualHistogramModel | None = None
     residual_model_path = os.getenv("SKYCOLOR_RESIDUAL_MODEL_PATH")
@@ -340,6 +339,7 @@ def create_app(provider_mode: str | None = None) -> FastAPI:
                 "apply_residual": payload.apply_residual,
                 "residual_model": residual_model,
                 "camera_profile": payload.camera.to_contract() if payload.camera else None,
+                "horizon_model": horizon_model,
             },
         )
         return ColorSignatureResponse(**signature.to_dict())
@@ -377,6 +377,7 @@ def create_app(provider_mode: str | None = None) -> FastAPI:
                         "apply_residual": payload.apply_residual,
                         "residual_model": residual_model,
                         "camera_profile": payload.camera.to_contract() if payload.camera else None,
+                        "horizon_model": horizon_model,
                     },
                 ).signature
             else:
@@ -388,6 +389,7 @@ def create_app(provider_mode: str | None = None) -> FastAPI:
                     target_surface,
                     config={
                         "camera_profile": payload.camera.to_contract() if payload.camera else None,
+                        "horizon_model": horizon_model,
                     },
                 )
 
@@ -427,6 +429,7 @@ def create_app(provider_mode: str | None = None) -> FastAPI:
                             "apply_residual": payload.apply_residual,
                             "residual_model": residual_model,
                             "camera_profile": payload.camera.to_contract() if payload.camera else None,
+                            "horizon_model": horizon_model,
                         },
                     ).signature
                 else:
@@ -438,6 +441,7 @@ def create_app(provider_mode: str | None = None) -> FastAPI:
                         surface,
                         config={
                             "camera_profile": payload.camera.to_contract() if payload.camera else None,
+                            "horizon_model": horizon_model,
                         },
                     )
 
