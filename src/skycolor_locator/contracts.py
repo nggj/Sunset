@@ -45,6 +45,18 @@ class AtmosphereState:
     visibility_km: float | None = None
     pressure_hpa: float | None = None
     cloud_optical_depth: float | None = None
+    cloud_fraction_low: float | None = None
+    cloud_fraction_mid: float | None = None
+    cloud_fraction_high: float | None = None
+    cloud_optical_depth_low: float | None = None
+    cloud_optical_depth_mid: float | None = None
+    cloud_optical_depth_high: float | None = None
+    cloud_fraction_sat: float | None = None
+    cloud_optical_depth_sat: float | None = None
+    cloud_top_height_m: float | None = None
+    cloud_base_height_m: float | None = None
+    cloud_top_pressure_hpa: float | None = None
+    cloud_base_pressure_hpa: float | None = None
     missing_realtime: bool = False
 
 
@@ -58,6 +70,20 @@ class SurfaceClass(StrEnum):
     DESERT = "desert"
     FOREST = "forest"
 
+
+
+
+@dataclass(slots=True)
+class CameraProfile:
+    """Camera field-of-view and orientation sampling profile."""
+
+    hfov_deg: float = 70.0
+    vfov_deg: float = 45.0
+    yaw_deg: float = 0.0
+    pitch_deg: float = 0.0
+    roll_deg: float = 0.0
+    sample_width: int = 64
+    sample_height: int = 40
 
 @dataclass(slots=True)
 class SurfaceState:

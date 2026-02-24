@@ -19,6 +19,7 @@ from skycolor_locator.contracts import AtmosphereState, SurfaceClass, SurfaceSta
 from skycolor_locator.ingest.cache import LRUCache
 from skycolor_locator.ingest.interfaces import EarthStateProvider, SurfaceProvider
 from skycolor_locator.ingest.gee_client import GeeConfig, config_from_env, init_ee
+from skycolor_locator.ingest.gee_cloud_s5p import fetch_s5p_cloud_features
 
 # ERA5 ozone conversion: DU = total_column_ozone / 2.1415E-5 (kg/m^2 per DU)
 _DU_KG_M2 = 2.1415e-5
@@ -107,6 +108,9 @@ def _relative_humidity_from_t_td(temp_k: float, dewpoint_k: float) -> float:
 class GeeAtmosphereConfig:
     era5_window_hours: int = 2
     cams_window_hours: int = 24
+    include_s5p_cloud: bool = False
+    s5p_time_window_hours: int = 36
+    prefer_s5p_cloud_optics: bool = True
     # Scales chosen close to dataset native resolution to avoid expensive operations.
     era5_scale_m: int = 30_000
     cams_scale_m: int = 50_000
@@ -224,6 +228,23 @@ class GeeEarthStateProvider(EarthStateProvider):
                 if aod is not None:
                     aod = _clamp(float(aod), 0.0, 5.0)
 
+
+            s5p_features: dict[str, float] | None = None
+            if self._atmos_cfg.include_s5p_cloud:
+                pt = ee.Geometry.Point([float(lon), float(lat)])
+                s5p_features = fetch_s5p_cloud_features(
+                    ee=ee,
+                    dt_utc=dt_utc,
+                    geometry=pt,
+                    time_window_hours=self._atmos_cfg.s5p_time_window_hours,
+                )
+                if (
+                    self._atmos_cfg.prefer_s5p_cloud_optics
+                    and s5p_features is not None
+                    and "cloud_optical_depth" in s5p_features
+                ):
+                    cloud_optical_depth = max(0.0, float(s5p_features["cloud_optical_depth"]))
+
             # --- Fill required fields with fallback if missing ---
             if cloud_fraction is None:
                 cloud_fraction = 0.5
@@ -242,6 +263,18 @@ class GeeEarthStateProvider(EarthStateProvider):
                 humidity=humidity,
                 pressure_hpa=pressure_hpa,
                 cloud_optical_depth=cloud_optical_depth,
+                cloud_fraction_sat=None if s5p_features is None else s5p_features.get("cloud_fraction"),
+                cloud_optical_depth_sat=None
+                if s5p_features is None
+                else s5p_features.get("cloud_optical_depth"),
+                cloud_top_height_m=None if s5p_features is None else s5p_features.get("cloud_top_height"),
+                cloud_base_height_m=None if s5p_features is None else s5p_features.get("cloud_base_height"),
+                cloud_top_pressure_hpa=None
+                if s5p_features is None or s5p_features.get("cloud_top_pressure") is None
+                else float(s5p_features["cloud_top_pressure"]) / 100.0,
+                cloud_base_pressure_hpa=None
+                if s5p_features is None or s5p_features.get("cloud_base_pressure") is None
+                else float(s5p_features["cloud_base_pressure"]) / 100.0,
                 missing_realtime=missing,
             )
 

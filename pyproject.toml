@@ -27,6 +27,11 @@ ml = [
   "numpy>=1.26.0",
 ]
 
+gee = [
+  "earthengine-api",
+]
+
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 
