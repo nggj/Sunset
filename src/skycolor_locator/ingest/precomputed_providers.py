@@ -130,6 +130,16 @@ class PrecomputedEarthStateProvider(EarthStateProvider):
                     if mapped.get("cloud_optical_depth") is not None
                     else None
                 ),
+                cloud_ice_fraction=(
+                    _as_float(mapped["cloud_ice_fraction"], "cloud_ice_fraction")
+                    if mapped.get("cloud_ice_fraction") is not None
+                    else None
+                ),
+                cloud_effective_radius_um=(
+                    _as_float(mapped["cloud_effective_radius_um"], "cloud_effective_radius_um")
+                    if mapped.get("cloud_effective_radius_um") is not None
+                    else None
+                ),
                 missing_realtime=bool(mapped.get("missing_realtime", False)),
             )
 

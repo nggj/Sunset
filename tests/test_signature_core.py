@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from skycolor_locator.contracts import AtmosphereState, SurfaceClass, SurfaceState
+from skycolor_locator.contracts import CameraProfile, AtmosphereState, SurfaceClass, SurfaceState
 from skycolor_locator.signature.core import _allocate_ground_sample_counts, compute_color_signature
 
 
@@ -137,3 +137,47 @@ def test_allocate_ground_sample_counts_is_deterministic() -> None:
 
     assert counts_first == counts_second
     assert sum(counts_first.values()) == 2000
+
+
+def test_camera_profile_pitch_changes_signature_weights() -> None:
+    """Camera pitch should shift sky/ground weighting in the signature vector."""
+    dt, atmos, surface = _inputs()
+    up = compute_color_signature(
+        dt,
+        35.0,
+        129.0,
+        atmos,
+        surface,
+        {"bins": 18, "camera_profile": CameraProfile(pitch_deg=45.0)},
+    )
+    down = compute_color_signature(
+        dt,
+        35.0,
+        129.0,
+        atmos,
+        surface,
+        {"bins": 18, "camera_profile": CameraProfile(pitch_deg=-45.0)},
+    )
+
+    assert up.meta["sky_ground_weights"]["sky"] > down.meta["sky_ground_weights"]["sky"]
+    assert up.signature != down.signature
+
+
+def test_camera_profile_yaw_is_deterministic() -> None:
+    """Identical camera profile inputs should produce deterministic outputs."""
+    dt, atmos, surface = _inputs()
+    cfg = {
+        "bins": 18,
+        "camera_profile": CameraProfile(
+            fov_h_deg=80.0,
+            fov_v_deg=50.0,
+            yaw_deg=30.0,
+            pitch_deg=10.0,
+            roll_deg=5.0,
+        ),
+    }
+
+    first = compute_color_signature(dt, 35.0, 129.0, atmos, surface, cfg)
+    second = compute_color_signature(dt, 35.0, 129.0, atmos, surface, cfg)
+
+    assert first.signature == second.signature
