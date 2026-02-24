@@ -174,6 +174,42 @@ def _serialize_atmosphere_state(atmos: AtmosphereState) -> dict[str, Any]:
         "cloud_optical_depth": None
         if atmos.cloud_optical_depth is None
         else float(atmos.cloud_optical_depth),
+        "cloud_fraction_low": None
+        if atmos.cloud_fraction_low is None
+        else float(atmos.cloud_fraction_low),
+        "cloud_fraction_mid": None
+        if atmos.cloud_fraction_mid is None
+        else float(atmos.cloud_fraction_mid),
+        "cloud_fraction_high": None
+        if atmos.cloud_fraction_high is None
+        else float(atmos.cloud_fraction_high),
+        "cloud_optical_depth_low": None
+        if atmos.cloud_optical_depth_low is None
+        else float(atmos.cloud_optical_depth_low),
+        "cloud_optical_depth_mid": None
+        if atmos.cloud_optical_depth_mid is None
+        else float(atmos.cloud_optical_depth_mid),
+        "cloud_optical_depth_high": None
+        if atmos.cloud_optical_depth_high is None
+        else float(atmos.cloud_optical_depth_high),
+        "cloud_fraction_sat": None
+        if atmos.cloud_fraction_sat is None
+        else float(atmos.cloud_fraction_sat),
+        "cloud_optical_depth_sat": None
+        if atmos.cloud_optical_depth_sat is None
+        else float(atmos.cloud_optical_depth_sat),
+        "cloud_top_height_m": None
+        if atmos.cloud_top_height_m is None
+        else float(atmos.cloud_top_height_m),
+        "cloud_base_height_m": None
+        if atmos.cloud_base_height_m is None
+        else float(atmos.cloud_base_height_m),
+        "cloud_top_pressure_hpa": None
+        if atmos.cloud_top_pressure_hpa is None
+        else float(atmos.cloud_top_pressure_hpa),
+        "cloud_base_pressure_hpa": None
+        if atmos.cloud_base_pressure_hpa is None
+        else float(atmos.cloud_base_pressure_hpa),
         "missing_realtime": bool(atmos.missing_realtime),
     }
 
@@ -190,5 +226,41 @@ def _deserialize_atmosphere_state(data: dict[str, Any]) -> AtmosphereState:
         cloud_optical_depth=None
         if data.get("cloud_optical_depth") is None
         else float(data["cloud_optical_depth"]),
+        cloud_fraction_low=None
+        if data.get("cloud_fraction_low") is None
+        else float(data["cloud_fraction_low"]),
+        cloud_fraction_mid=None
+        if data.get("cloud_fraction_mid") is None
+        else float(data["cloud_fraction_mid"]),
+        cloud_fraction_high=None
+        if data.get("cloud_fraction_high") is None
+        else float(data["cloud_fraction_high"]),
+        cloud_optical_depth_low=None
+        if data.get("cloud_optical_depth_low") is None
+        else float(data["cloud_optical_depth_low"]),
+        cloud_optical_depth_mid=None
+        if data.get("cloud_optical_depth_mid") is None
+        else float(data["cloud_optical_depth_mid"]),
+        cloud_optical_depth_high=None
+        if data.get("cloud_optical_depth_high") is None
+        else float(data["cloud_optical_depth_high"]),
+        cloud_fraction_sat=None
+        if data.get("cloud_fraction_sat") is None
+        else float(data["cloud_fraction_sat"]),
+        cloud_optical_depth_sat=None
+        if data.get("cloud_optical_depth_sat") is None
+        else float(data["cloud_optical_depth_sat"]),
+        cloud_top_height_m=None
+        if data.get("cloud_top_height_m") is None
+        else float(data["cloud_top_height_m"]),
+        cloud_base_height_m=None
+        if data.get("cloud_base_height_m") is None
+        else float(data["cloud_base_height_m"]),
+        cloud_top_pressure_hpa=None
+        if data.get("cloud_top_pressure_hpa") is None
+        else float(data["cloud_top_pressure_hpa"]),
+        cloud_base_pressure_hpa=None
+        if data.get("cloud_base_pressure_hpa") is None
+        else float(data["cloud_base_pressure_hpa"]),
         missing_realtime=bool(data.get("missing_realtime", False)),
     )

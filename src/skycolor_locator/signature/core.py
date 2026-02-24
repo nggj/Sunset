@@ -473,7 +473,14 @@ def compute_color_signature(
     if apply_residual:
         if residual_model is None:
             raise ValueError("apply_residual=True requires residual_model in config")
-        features, _ = featurize(dt=dt, lat=lat, lon=lon, atmos=atmos, surface=surface)
+        features, _ = featurize(
+            dt=dt,
+            lat=lat,
+            lon=lon,
+            atmos=atmos,
+            surface=surface,
+            feature_names=list(residual_model.feature_names),
+        )
         return residual_model.apply_to_signature(baseline, features)
 
     return baseline

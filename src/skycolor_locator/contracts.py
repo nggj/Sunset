@@ -45,8 +45,18 @@ class AtmosphereState:
     visibility_km: float | None = None
     pressure_hpa: float | None = None
     cloud_optical_depth: float | None = None
-    cloud_ice_fraction: float | None = None
-    cloud_effective_radius_um: float | None = None
+    cloud_fraction_low: float | None = None
+    cloud_fraction_mid: float | None = None
+    cloud_fraction_high: float | None = None
+    cloud_optical_depth_low: float | None = None
+    cloud_optical_depth_mid: float | None = None
+    cloud_optical_depth_high: float | None = None
+    cloud_fraction_sat: float | None = None
+    cloud_optical_depth_sat: float | None = None
+    cloud_top_height_m: float | None = None
+    cloud_base_height_m: float | None = None
+    cloud_top_pressure_hpa: float | None = None
+    cloud_base_pressure_hpa: float | None = None
     missing_realtime: bool = False
 
 

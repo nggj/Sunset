@@ -27,6 +27,9 @@ def _sample_record(tile_id: str = "step0.0500:lat37.5500:lon126.9500") -> EarthS
             visibility_km=16.2,
             pressure_hpa=1012.4,
             cloud_optical_depth=4.1,
+            cloud_fraction_sat=0.33,
+            cloud_optical_depth_sat=12.0,
+            cloud_top_height_m=8500.0,
             missing_realtime=False,
         ),
         meta={"provider": "mock", "source_time": "2024-05-12T09:03:00+00:00"},
@@ -57,6 +60,10 @@ def test_sqlite_earthstate_store_roundtrip(tmp_path) -> None:
     assert loaded.atmos.visibility_km == record.atmos.visibility_km
     assert loaded.atmos.pressure_hpa == record.atmos.pressure_hpa
     assert loaded.atmos.cloud_optical_depth == record.atmos.cloud_optical_depth
+    assert loaded.atmos.cloud_fraction_sat == record.atmos.cloud_fraction_sat
+    assert loaded.atmos.cloud_optical_depth_sat == record.atmos.cloud_optical_depth_sat
+    assert loaded.atmos.cloud_top_height_m == record.atmos.cloud_top_height_m
+    assert loaded.atmos.cloud_fraction_low is None
     assert loaded.atmos.missing_realtime == record.atmos.missing_realtime
 
 
